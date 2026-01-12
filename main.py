@@ -20,10 +20,10 @@ import config
 # ==========================================
 # [설정] AI 모델 및 API 키
 # ==========================================
-GEMINI_API_KEY = "AIzaSyDfB7KbYJAKlDbcdythNT6WWG3txKrPz44" 
 HISTORY_FILE = "visited_history.txt"
 
-genai.configure(api_key=GEMINI_API_KEY)
+# config.py에서 API 키 가져오기
+genai.configure(api_key=config.GEMINI_API_KEY)
 try:
     model = genai.GenerativeModel('gemini-2.5-flash')
     print("[INFO] Gemini 2.5 Flash 모델 가동")

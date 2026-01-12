@@ -12,15 +12,19 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 
 # ================= [테스트 설정 구역] =================
-NAVER_ID = "horse324"   
-NAVER_PW = "1qaz2wsx" 
-GEMINI_API_KEY = "AIzaSyDfB7KbYJAKlDbcdythNT6WWG3txKrPz44"
+# config.py에서 설정을 가져옵니다
+import sys
+sys.path.append('.')
+import config
+
+NAVER_ID = config.NAVER_ID
+NAVER_PW = config.NAVER_PW
 TARGET_URL = "https://cafe.naver.com/f-e/cafes/10197921/articles/29392388"
 HISTORY_FILE = "visited_history.txt"
 # ====================================================
 
 # ★ 최신 Gemini 2.5 Flash 모델 적용 (2026년 1월 기준 무료 티어 최신)
-genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(api_key=config.GEMINI_API_KEY)
 
 # 최신 모델: gemini-2.5-flash (무료 티어에서 사용 가능한 최신 버전)
 try:
