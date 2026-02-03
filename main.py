@@ -765,7 +765,7 @@ def run_search_bot():
                         
                         print(f"\n>>> 게시판(메뉴 {menu_id}) / 키워드: '{keyword}'")
                         driver.get(search_url)
-                        time.sleep(random.uniform(3, 4))
+                        time.sleep(random.uniform(0.5, 1) if DRY_RUN else random.uniform(3, 4))
                         
                         all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
                         
@@ -794,7 +794,7 @@ def run_search_bot():
                             try:
                                 print(f"\n[분석] {title[:15]}...")
                                 driver.get(link)
-                                time.sleep(random.uniform(2, 3))
+                                time.sleep(random.uniform(0.5, 1) if DRY_RUN else random.uniform(2, 3))
                                 
                                 try: driver.switch_to.frame("cafe_main")
                                 except: pass
@@ -819,13 +819,14 @@ def run_search_bot():
 
                                 try:
                                     if DRY_RUN:
-                                        # 가실행 모드: 댓글을 실제로 달지 않음
+                                        # 가실행 모드: 댓글을 실제로 달지 않음 (딜레이 없이 빠르게)
                                         print("  -> [가실행] 댓글 생성 완료 (실제 등록하지 않음)")
                                         print(f"     생성된 댓글: {ai_reply[:100]}...")
                                         # 히스토리와 로그는 정상 기록
                                         append_history(link)
                                         visited_links.add(link)
                                         save_comment_history(link, title, ai_reply, success=True, **extra)
+                                        # 가실행 모드: 딜레이 없이 바로 다음 글로
                                     else:
                                         # 일반 모드: 실제로 댓글 등록
                                         inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
@@ -853,22 +854,23 @@ def run_search_bot():
                                         
                                         # 댓글 성공 기록
                                         save_comment_history(link, title, ai_reply, success=True, **extra)
-                                    # 댓글 간 랜덤 딜레이 (설정 리로드로 delay_min/max 반영)
-                                    bot_config = load_bot_config()
-                                    min_delay_sec = bot_config.get("min_delay_seconds", 50)
-                                    cph_min = bot_config.get("comments_per_hour_min")
-                                    cph_max = bot_config.get("comments_per_hour_max")
-                                    if cph_min and cph_max and 0 < cph_min <= cph_max:
-                                        d_max = 3600 / cph_min
-                                        d_min_cand = 3600 / cph_max
-                                        d_min = max(min_delay_sec, d_min_cand)
-                                        d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
-                                        d_max = max(d_max, d_min + 1)
-                                    else:
-                                        d_min, d_max = min_delay_sec, bot_config.get("max_delay_seconds", 720)
-                                    delay = random.uniform(d_min, d_max)
-                                    print(f"  -> 대기 {delay:.0f}초 (랜덤)...")
-                                    time.sleep(delay)
+                                        
+                                        # 일반 모드만 댓글 간 랜덤 딜레이 적용
+                                        bot_config = load_bot_config()
+                                        min_delay_sec = bot_config.get("min_delay_seconds", 50)
+                                        cph_min = bot_config.get("comments_per_hour_min")
+                                        cph_max = bot_config.get("comments_per_hour_max")
+                                        if cph_min and cph_max and 0 < cph_min <= cph_max:
+                                            d_max = 3600 / cph_min
+                                            d_min_cand = 3600 / cph_max
+                                            d_min = max(min_delay_sec, d_min_cand)
+                                            d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
+                                            d_max = max(d_max, d_min + 1)
+                                        else:
+                                            d_min, d_max = min_delay_sec, bot_config.get("max_delay_seconds", 720)
+                                        delay = random.uniform(d_min, d_max)
+                                        print(f"  -> 대기 {delay:.0f}초 (랜덤)...")
+                                        time.sleep(delay)
 
                                 except Exception as e:
                                     print(f"  -> [실패] {e}")
@@ -886,6 +888,11 @@ def run_search_bot():
             
             if should_stop:
                 break
+            
+            # 가실행 모드: 휴식 없이 바로 다음 사이클
+            if DRY_RUN:
+                print(f">>> [가실행] 휴식 없이 다음 사이클...")
+                continue
                 
             print(f">>> 휴식 {rest_minutes}분...")
             # 휴식 중에도 종료 플래그 확인
