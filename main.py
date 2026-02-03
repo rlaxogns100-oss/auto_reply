@@ -211,7 +211,8 @@ except:
     answer_agent = genai.GenerativeModel('gemini-2.5-flash')
     print("[INFO] Answer Agent: gemini-2.5-flash (fallback)")
 
-TARGET_KEYWORDS = [
+# 기본 키워드 (bot_config.json에 없을 때 사용)
+DEFAULT_KEYWORDS = [
     # 1. [핵심] 정시 파이터들의 공통 언어 (가장 중요)
     "정시", "표점", "표준점수", "환산점수", "백분위",
     "추합", "예비", "최초합", "전찬", "추가합격",
@@ -227,6 +228,20 @@ TARGET_KEYWORDS = [
     "동국대", "명지대", "서강대", "광운대", "선리대",
     "숭실대", "이화여대"      
 ]
+
+def load_keywords():
+    """bot_config.json에서 검색 키워드 로드. 없거나 비어 있으면 기본값 사용."""
+    if os.path.exists(BOT_CONFIG_FILE):
+        try:
+            with open(BOT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                keywords = data.get("keywords", [])
+                if keywords and len(keywords) > 0:
+                    return keywords
+        except Exception:
+            pass
+    return DEFAULT_KEYWORDS
+
 # Backend API URL (config에서 가져오기, 기본값: 로컬)
 BACKEND_URL = getattr(config, 'BACKEND_URL', 'http://localhost:8000')
 
@@ -235,28 +250,13 @@ BACKEND_URL = getattr(config, 'BACKEND_URL', 'http://localhost:8000')
 # ==========================================
 QUERY_AGENT_PROMPT = """당신은 대학 입시 커뮤니티 게시글을 분석하는 **Query Agent**입니다.
 
-## 역할
-게시글을 읽고 **도움이 필요한 수험생의 질문**인지 판단한 후, 필요시 RAG 검색을 위한 함수 호출을 생성하세요.
-
-## 🚨 1차 필터 - PASS 해야 하는 경우 (빈 배열 반환)
-다음 중 하나라도 해당되면 function_calls를 빈 배열로 반환하세요:
-1. **이미 합격한 사람**: "합격 후기", "최초합", "합격했습니다", "대학 갑니다" 등
-2. **정보 공유/자료 배포**: 질문이 아니라 팁을 알려주는 글, 자료 나눔글
-3. **광고/홍보**: 학원 홍보, 과외 모집, 스터디 모집
-4. **공지사항**: 카페 공지, 필독 등
-5. **단순 잡담**: 연애, 유머, 입시와 무관한 일상
-6. 공부법, 학교생활에 관한 질문
-7. 이외 기타 '입시요강, 입결, 대학별 점수 환산&비교' 자료를 통해 대답할 수 없는 질문.(예, 학원 추천, 커리 추천, 공부법 상담, 멘탈 상담 등)
-8. 시간상 유효하지 않은 질문(예를 들어, 2026 입시 합격 가능성에 대한 질문은 이미 결과가 나왔으므로 유효하지 않음.)
-
-## '입시요강, 입결, 대학별 점수 환산&비교' 자료를 통해 명확하게 대답 가능한 질문만 까다롭게 선정하세요. 그 외 질문은 모두 빈 배열로 반환하세요.
-
+## **대답 가능한 질문 목록** 아래에 해당하는 내용 대해서만 함수를 호출하세요. 해당하지 않는 내용은 모두 빈 배열로 반환하세요.
 
 
 ## 정체성
-당신의 역할은 정보 검색을 위한 json 형식의 함수 호출입니다. 당신이 찾은 정보와 대화의 맥락을 종합하여 main agent가 최종적인 답변을 생성합니다, 정확한 함수를 올바르게 호출하여 정보를 검색하세요.
-단일 질문 뿐 아니라 이전 대화 히스토리 내용을 고려하여 적절하게 판단하세요.
-이전 히스토리의 출력은 main_agent의 출력 형식입니다. 따라하지 말고 아래에 명시된 출력 형식을 지키세요.
+당신의 역할은 정보 검색을 위한 json 형식의 함수 호출입니다. 당신이 찾은 정보와 대화의 맥락을 종합하여 main agent가 최종적인 답변을 생성합니다.
+아래에 명시된 출력 형식을 지키세요. 정확한 함수를 올바르게 호출하여 정보를 검색하세요.
+
 
 ## 시점 동기화
 - 2026년 1월 (2026학년도 입시 종료)
@@ -802,10 +802,14 @@ def run_search_bot():
             if not menu_ids:
                 menu_ids = [0]
             
+            # 키워드 로드 (매 사이클마다 새로 로드하여 실시간 반영)
+            keywords = load_keywords()
+            print(f"[INFO] 검색 키워드 {len(keywords)}개 로드됨")
+            
             for menu_id in menu_ids:
                 if should_stop or check_stop_flag():
                     break
-                for keyword in TARGET_KEYWORDS:
+                for keyword in keywords:
                     if should_stop or check_stop_flag():
                         break
                         
