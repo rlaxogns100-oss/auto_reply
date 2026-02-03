@@ -57,9 +57,9 @@ def check_stop_flag():
 def load_bot_config():
     """봇 설정 파일 로드"""
     default_config = {
-        "max_comments_per_minute": 1,
         "min_delay_seconds": 50,
-        "max_delay_seconds": 80,
+        "comments_per_hour_min": 5,
+        "comments_per_hour_max": 10,
         "rest_minutes": 3
     }
     if os.path.exists(BOT_CONFIG_FILE):
@@ -196,6 +196,10 @@ QUERY_AGENT_PROMPT = """당신은 대학 입시 커뮤니티 게시글을 분석
 5. **단순 잡담**: 연애, 유머, 입시와 무관한 일상
 6. 공부법, 학교생활에 관한 질문
 7. 이외 기타 '입시요강, 입결, 대학별 점수 환산&비교' 자료를 통해 대답할 수 없는 질문.
+8. 시간상 유효하지 않은 질문(예를 들어, 2026 입시 합격 가능성에 대한 질문은 이미 결과가 나왔으므로 유효하지 않음.)
+
+## '입시요강, 입결, 대학별 점수 환산&비교' 자료를 통해 명확하게 대답 가능한 질문만 까다롭게 선정하세요. 그 외 질문은 모두 빈 배열로 반환하세요.
+
 
 ## 정체성
 당신의 역할은 정보 검색을 위한 json 형식의 함수 호출입니다. 당신이 찾은 정보와 대화의 맥락을 종합하여 main agent가 최종적인 답변을 생성합니다, 정확한 함수를 올바르게 호출하여 정보를 검색하세요.
@@ -536,30 +540,38 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         [작성 전략: 철저한 데이터 기반의 컨설팅]
 
 1. **🎯 핵심 가치 (Value Proposition)**
-   - **무조건 '숫자'로 팩폭:** RAG로 가져온 **'작년 입결(70% 컷)', '환산 점수', '모집 인원 변화'** 등 구체적인 수치를 반드시 하나 이상 인용해.
+   - **무조건 '숫자'로 대답:** RAG로 가져온 **'작년 입결(70% 컷)', '환산 점수', '모집 인원 변화'** 등 구체적인 수치를 반드시 하나 이상 인용해.
    - **정시/교과 파이터 모드:** 질문자의 성적이 애매하면 "이 점수면 OO대는 위험하고 △△대가 차라리 낫다"는 식으로 **대안을 제시**하거나 **합격 가능성을 냉정하게 진단**해.
    - **내용:** "유리하다" 같은 모호한 표현 대신, "작년 컷(392점)보다 3점 높아 안정적이에요", "해당 대학에서 가장 낮은 컷(심리학과, 395점)보다 2점 낮아 어려워요."처럼 **수치 중심**으로 설명.
 
 
 2. **🗣️ 톤앤매너 (Tone & Manner)**
-   - **말투:** "~해요"체 사용하되, 자신감 있고 확신에 찬 어조. (비굴하거나 너무 공손하지 않게)
+   - **말투:** "~해요"체 사용하되, 자신감 있고 확신에 찬 어조. (친절한 선배 말투, 무례하지 않게.)
    - **길이:** 3~4문장. (서론 빼고 본론만 딱.)
 
-        [출력]
-        댓글 내용만 출력하세요.
+3. **출력 형식:** 댓글 내용만 출력하세요.
+   - **다른 말 없이 댓글 내용만 출력하세요**
+   - **마크다운 형식(**, ##, > 등) 사용 금지.** 평문(Plain Text)만 사용.
+   - **중요** 생성한 댓글이 명확하게 도움되지 않거나, 학생이 공격적으로 느낄 수 있다고 느껴지면 빈 배열을 반환하세요.      
         """
         
         # Answer Agent로 답변 생성 (gemini-3-flash-preview)
         response = answer_agent.generate_content(prompt)
-        result = response.text.strip()
-        result = result.replace('"', '').replace("'", "") # 따옴표 제거
+        result = (response.text or "").strip()
+        result = result.replace('"', '').replace("'", "")  # 따옴표 제거
+        result = result.strip()
+        
+        # 할 말 없으면 댓글 안 달고 넘어감 (Query Agent와 동일하게 PASS)
+        if not result:
+            print("  -> [Answer Agent] 할 말 없음 - PASS (댓글 생략)")
+            return None
         
         # 고정 형식으로 포맷팅
         formatted_reply = f"""수험생 전문 ai에 물어보니까 이러네요
 
 {result}
 
-구글에 uni2road 검색해서 써 보세요"""
+구글에 uni2road 검색해서 써 보세요""" 
         
         return formatted_reply
             
@@ -591,11 +603,15 @@ def run_search_bot():
     
     # 설정 로드
     bot_config = load_bot_config()
-    min_delay = bot_config.get("min_delay_seconds", 50)
-    max_delay = bot_config.get("max_delay_seconds", 80)
     rest_minutes = bot_config.get("rest_minutes", 3)
-    
-    print(f"[봇 설정] 딜레이: {min_delay}-{max_delay}초, 휴식: {rest_minutes}분")
+    cph_min = bot_config.get("comments_per_hour_min")
+    cph_max = bot_config.get("comments_per_hour_max")
+    if cph_min and cph_max and 0 < cph_min <= cph_max:
+        print(f"[봇 설정] 시간당 댓글: {cph_min}~{cph_max}개, 휴식: {rest_minutes}분 (댓글 간 랜덤 딜레이 적용)")
+    else:
+        min_d = bot_config.get("min_delay_seconds", 50)
+        max_d = bot_config.get("max_delay_seconds", 720)
+        print(f"[봇 설정] 딜레이: {min_d}-{max_d}초, 휴식: {rest_minutes}분")
     
     chrome_options = Options()
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -636,9 +652,20 @@ def run_search_bot():
             
             # 설정 리로드 (런타임 변경 반영)
             bot_config = load_bot_config()
-            min_delay = bot_config.get("min_delay_seconds", 50)
-            max_delay = bot_config.get("max_delay_seconds", 80)
+            min_delay_sec = bot_config.get("min_delay_seconds", 50)
+            cph_min = bot_config.get("comments_per_hour_min")
+            cph_max = bot_config.get("comments_per_hour_max")
             rest_minutes = bot_config.get("rest_minutes", 3)
+            # 시간당 댓글 수 범위로 랜덤 딜레이 계산 (예: 5~10개/시간 → 360~720초)
+            if cph_min and cph_max and 0 < cph_min <= cph_max:
+                delay_max = 3600 / cph_min
+                delay_min_candidate = 3600 / cph_max
+                delay_min = max(min_delay_sec, delay_min_candidate)
+                delay_min = min(delay_min, delay_max - 1) if delay_min >= delay_max else delay_min
+                delay_max = max(delay_max, delay_min + 1)
+            else:
+                delay_min = min_delay_sec
+                delay_max = bot_config.get("max_delay_seconds", 720)  # 기본 720초(시간당 5개 수준)
             
             for keyword in TARGET_KEYWORDS:
                 if should_stop or check_stop_flag():
@@ -727,9 +754,21 @@ def run_search_bot():
                                 
                                 # 댓글 성공 기록
                                 save_comment_history(link, title, ai_reply, success=True)
-                                
-                                delay = random.uniform(min_delay, max_delay)
-                                print(f"  -> 대기 {delay:.0f}초...")
+                                # 댓글 간 랜덤 딜레이 (설정 리로드로 delay_min/max 반영)
+                                bot_config = load_bot_config()
+                                min_delay_sec = bot_config.get("min_delay_seconds", 50)
+                                cph_min = bot_config.get("comments_per_hour_min")
+                                cph_max = bot_config.get("comments_per_hour_max")
+                                if cph_min and cph_max and 0 < cph_min <= cph_max:
+                                    d_max = 3600 / cph_min
+                                    d_min_cand = 3600 / cph_max
+                                    d_min = max(min_delay_sec, d_min_cand)
+                                    d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
+                                    d_max = max(d_max, d_min + 1)
+                                else:
+                                    d_min, d_max = min_delay_sec, bot_config.get("max_delay_seconds", 720)
+                                delay = random.uniform(d_min, d_max)
+                                print(f"  -> 대기 {delay:.0f}초 (랜덤)...")
                                 time.sleep(delay)
 
                             except Exception as e:
