@@ -22,6 +22,15 @@ dry_run_history.json
 .stop_bot
 .bot_pid
 
+# ?? ?? ?? (???? ??)
+*.service
+*.sh
+skip_links.json
+
+# ?? ??
+bot.log
+bot.log.old
+
 # IDE
 .vscode/
 .idea/
