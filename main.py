@@ -684,6 +684,12 @@ def run_search_bot():
     # 서버용 Headless 옵션
     if HEADLESS_MODE:
         print("[봇] Headless 모드로 실행")
+        
+        # PID 기반 고유 user-data-dir 생성 (Chrome crash 방지)
+        user_data_dir = os.path.join(SCRIPT_DIR, f"chrome_data_{os.getpid()}")
+        os.makedirs(user_data_dir, exist_ok=True)
+        print(f"[봇] Chrome user-data-dir: {user_data_dir}")
+        
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
@@ -691,6 +697,7 @@ def run_search_bot():
         chrome_options.add_argument("--disable-software-rasterizer")
         chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--disable-setuid-sandbox")
+        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--disable-features=VizDisplayCompositor")
         chrome_options.add_argument("--disable-background-networking")
@@ -894,6 +901,18 @@ def run_search_bot():
     finally:
         print("[봇] 브라우저 종료 중...")
         driver.quit()
+        
+        # Headless 모드에서 user-data-dir 정리
+        if HEADLESS_MODE:
+            user_data_dir = os.path.join(SCRIPT_DIR, f"chrome_data_{os.getpid()}")
+            if os.path.exists(user_data_dir):
+                try:
+                    import shutil
+                    shutil.rmtree(user_data_dir)
+                    print(f"[봇] Chrome user-data-dir 정리 완료: {user_data_dir}")
+                except Exception as e:
+                    print(f"[봇] Chrome user-data-dir 정리 실패: {e}")
+        
         print("[봇] 종료 완료")
 
 if __name__ == "__main__":
