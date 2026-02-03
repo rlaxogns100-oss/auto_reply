@@ -566,9 +566,9 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         result = result.replace('"', '').replace("'", "")  # 따옴표 제거
         result = result.strip()
         
-        # 할 말 없으면 댓글 안 달고 넘어감 (Query Agent와 동일하게 PASS)
-        if not result:
-            print("  -> [Answer Agent] 할 말 없음 - PASS (댓글 생략)")
+        # 할 말 없거나 20자 이하면 댓글 안 달고 넘어감 (빈 배열/짧은 무의미 응답 차단)
+        if not result or len(result) <= 20:
+            print(f"  -> [Answer Agent] 할 말 없음/짧음 ({len(result)}자) - PASS (댓글 생략)")
             return None
         
         # 고정 형식으로 포맷팅
