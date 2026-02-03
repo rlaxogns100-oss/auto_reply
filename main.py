@@ -29,6 +29,7 @@ import config
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(SCRIPT_DIR, "naver_cookies.pkl")
 BOT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "bot_config.json")
+BOT_PROMPTS_FILE = os.path.join(SCRIPT_DIR, "bot_prompts.json")
 COMMENT_HISTORY_FILE = os.path.join(SCRIPT_DIR, "comment_history.json")
 STOP_FLAG_FILE = os.path.join(SCRIPT_DIR, ".stop_bot")
 
@@ -54,6 +55,45 @@ def check_stop_flag():
         return True
     return False
 
+# Answer Agent 기본 프롬프트 (관리 페이지에서 수정 가능)
+DEFAULT_ANSWER_PROMPT = """
+[작성 전략: 철저한 데이터 기반의 컨설팅]
+
+0. **최우선 규칙**
+    - 학생의 질문 맥락을 최우선으로 고려해서 대답하세요. 불필요한 정보 인용, 맥락상 어색한 답변은 절대로 하지 마세요.
+    - 학생의 점수(원점수, 백분위, 등급 등)은 본문에 있는 점수만 인용하세요, [📚 관련 입시 정보 (RAG)]에서 환산된 백분위는 절대 인용하지 마세요, 대학별 환산 점수만 인용해도 됩니다.
+
+1. **🎯 핵심 가치 (Value Proposition)**
+   - **무조건 '숫자'로 대답:** RAG로 가져온 **'작년 입결(70% 컷)', '환산 점수', '모집 인원 변화'** 등 구체적인 수치를 반드시 하나 이상 인용해.
+   - **정시/교과 파이터 모드:** 질문자의 성적이 애매하면 "이 점수면 OO대는 위험하고 △△대가 차라리 낫다"는 식으로 **대안을 제시**하거나 **합격 가능성을 냉정하게 진단**해.
+   - **내용:** "유리하다" 같은 모호한 표현 대신, "작년 컷(392점)보다 3점 높아 안정적이에요", "해당 대학에서 가장 낮은 컷(심리학과, 395점)보다 2점 낮아 어려워요."처럼 **수치 중심**으로 설명.
+
+2. **🗣️ 톤앤매너 (Tone & Manner)**
+   - **말투:** "~해요"체 사용하되, 자신감 있고 확신에 찬 어조. (친절한 선배 말투, 무례하지 않게.)
+   - **길이:** 3~4문장. (서론 빼고 본론만 딱.)
+
+3. **출력 형식:** 댓글 내용만 출력하세요.
+   - **다른 말 없이 댓글 내용만 출력하세요**
+   - **마크다운 형식(**, ##, > 등) 사용 금지.** 평문(Plain Text)만 사용.
+   - **중요** 위 [📚 관련 입시 정보 (RAG)] 블록에 적힌 수치(입결, 컷, 환산점수, 모집인원 등)를 근거로 한 답변이 아닐 경우에는 빈 배열을 반환하세요, 자료에 근거하지 않고 자체 생성하는 댓글은 절대로 달지 마세요.
+   - **중요** 생성한 댓글이 명확하게 도움되지 않거나, 학생이 공격적으로 느낄 수 있다고 느껴지면 빈 배열을 반환하세요.
+"""
+
+
+def load_answer_prompt():
+    """bot_prompts.json에서 Answer Agent 프롬프트 로드. 없거나 비어 있으면 기본값."""
+    if os.path.exists(BOT_PROMPTS_FILE):
+        try:
+            with open(BOT_PROMPTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                p = (data.get("answer_prompt") or "").strip()
+                if p:
+                    return p
+        except Exception:
+            pass
+    return DEFAULT_ANSWER_PROMPT.strip()
+
+
 def load_bot_config():
     """봇 설정 파일 로드"""
     default_config = {
@@ -71,8 +111,9 @@ def load_bot_config():
             pass
     return default_config
 
-def save_comment_history(post_url, post_title, comment_content, success=True):
-    """댓글 기록 저장"""
+def save_comment_history(post_url, post_title, comment_content, success=True,
+                         post_content=None, query=None, function_result=None):
+    """댓글 기록 저장 (원글/쿼리/함수결과는 관리 페이지 5열 표시용)"""
     history = []
     if os.path.exists(COMMENT_HISTORY_FILE):
         try:
@@ -88,6 +129,12 @@ def save_comment_history(post_url, post_title, comment_content, success=True):
         "comment": comment_content,
         "success": success
     }
+    if post_content is not None:
+        record["post_content"] = post_content
+    if query is not None:
+        record["query"] = query
+    if function_result is not None:
+        record["function_result"] = function_result
     history.append(record)
     
     # 최근 500개만 유지
@@ -530,6 +577,7 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         {rag_context}
         """
         
+        instruction = load_answer_prompt()
         prompt = f"""
         당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
         게시글을 읽고 도움이 되는 댓글을 작성하세요.
@@ -538,26 +586,7 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         제목: {title}
         본문: {content[:1000]}
         {rag_section}
-        [작성 전략: 철저한 데이터 기반의 컨설팅]
-
-0. **최우선 규칙**
-    - 학생의 질문 맥락을 최우선으로 고려해서 대답하세요. 불필요한 정보 인용, 맥락상 어색한 답변은 절대로 하지 마세요.
-    - 학생의 점수(원점수, 백분위, 등급 등)은 본문에 있는 점수만 인용하세요, [📚 관련 입시 정보 (RAG)]에서 환산된 백분위는 절대 인용하지 마세요, 대학별 환산 점수만 인용해도 됩니다.
-
-1. **🎯 핵심 가치 (Value Proposition)**
-   - **무조건 '숫자'로 대답:** RAG로 가져온 **'작년 입결(70% 컷)', '환산 점수', '모집 인원 변화'** 등 구체적인 수치를 반드시 하나 이상 인용해.
-   - **정시/교과 파이터 모드:** 질문자의 성적이 애매하면 "이 점수면 OO대는 위험하고 △△대가 차라리 낫다"는 식으로 **대안을 제시**하거나 **합격 가능성을 냉정하게 진단**해.
-   - **내용:** "유리하다" 같은 모호한 표현 대신, "작년 컷(392점)보다 3점 높아 안정적이에요", "해당 대학에서 가장 낮은 컷(심리학과, 395점)보다 2점 낮아 어려워요."처럼 **수치 중심**으로 설명.
-
-2. **🗣️ 톤앤매너 (Tone & Manner)**
-   - **말투:** "~해요"체 사용하되, 자신감 있고 확신에 찬 어조. (친절한 선배 말투, 무례하지 않게.)
-   - **길이:** 3~4문장. (서론 빼고 본론만 딱.)
-
-3. **출력 형식:** 댓글 내용만 출력하세요.
-   - **다른 말 없이 댓글 내용만 출력하세요**
-   - **마크다운 형식(**, ##, > 등) 사용 금지.** 평문(Plain Text)만 사용.
-   - **중요** 위 [📚 관련 입시 정보 (RAG)] 블록에 적힌 수치(입결, 컷, 환산점수, 모집인원 등)를 근거로 한 답변이 아닐 경우에는 빈 배열을 반환하세요, 자료에 근거하지 않고 자체 생성하는 댓글은 절대로 달지 마세요.
-   - **중요** 생성한 댓글이 명확하게 도움되지 않거나, 학생이 공격적으로 느낄 수 있다고 느껴지면 빈 배열을 반환하세요.
+        {instruction}
         """
         
         # Answer Agent로 답변 생성 (gemini-3-flash-preview)
@@ -578,7 +607,13 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 
 구글에 uni2road 검색해서 써 보세요""" 
         
-        return formatted_reply
+        # 관리 페이지 5열(원글/쿼리/함수결과/최종답변/링크) 저장용
+        extra = {
+            "post_content": (title or "") + "\n\n" + (content or "")[:2000],
+            "query": json.dumps(function_calls, ensure_ascii=False),
+            "function_result": rag_context or ""
+        }
+        return (formatted_reply, extra)
             
     except Exception as e:
         print(f"  -> [AI 에러] {e}")
@@ -672,123 +707,132 @@ def run_search_bot():
                 delay_min = min_delay_sec
                 delay_max = bot_config.get("max_delay_seconds", 720)  # 기본 720초(시간당 5개 수준)
             
-            for keyword in TARGET_KEYWORDS:
+            # 검색할 게시판(메뉴) ID: 없으면 전체(0)
+            menu_ids = getattr(config, "CAFE_MENU_IDS", None) or [0]
+            if not menu_ids:
+                menu_ids = [0]
+            
+            for menu_id in menu_ids:
                 if should_stop or check_stop_flag():
                     break
-                    
-                try:
-                    encoded = urllib.parse.quote(keyword)
-                    search_url = f"https://cafe.naver.com/f-e/cafes/{config.CLUB_ID}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={encoded}"
-                    
-                    print(f"\n>>> 키워드: '{keyword}'")
-                    driver.get(search_url)
-                    time.sleep(random.uniform(3, 4))
-                    
-                    all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
-                    
-                    if not all_links: continue
-
-                    target_links = []
-                    for a_tag in all_links[:8]:
-                        try:
-                            raw_link = a_tag.get_attribute('href')
-                            clean_link = raw_link.split('?')[0] if '?' in raw_link else raw_link
-                            title = a_tag.text.strip()
-                            if len(title) > 1: 
-                                target_links.append((clean_link, title))
-                        except: continue
-                    
-                    print(f" -> 대상(중복포함): {len(target_links)}개")
-
-                    for link, title in target_links:
-                        if should_stop or check_stop_flag():
-                            break
-                            
-                        if link in visited_links:
-                            print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
-                            continue 
+                for keyword in TARGET_KEYWORDS:
+                    if should_stop or check_stop_flag():
+                        break
                         
-                        try:
-                            print(f"\n[분석] {title[:15]}...")
-                            driver.get(link)
-                            time.sleep(random.uniform(2, 3))
-                            
-                            try: driver.switch_to.frame("cafe_main")
-                            except: pass
+                    try:
+                        encoded = urllib.parse.quote(keyword)
+                        search_url = f"https://cafe.naver.com/f-e/cafes/{config.CLUB_ID}/menus/{menu_id}?viewType=L&ta=ARTICLE_COMMENT&page=1&q={encoded}"
+                        
+                        print(f"\n>>> 게시판(메뉴 {menu_id}) / 키워드: '{keyword}'")
+                        driver.get(search_url)
+                        time.sleep(random.uniform(3, 4))
+                        
+                        all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
+                        
+                        if not all_links: continue
 
-                            content = ""
-                            try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
-                            except:
-                                try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
-                                except: content = ""
-                            
-                            ai_reply = analyze_and_generate_reply(title, content)
-                            
-                            if not ai_reply:
-                                print("  -> [PASS] (합격자/광고/무관함)")
-                                append_history(link)
-                                visited_links.add(link)
-                                driver.switch_to.default_content()
-                                continue
-                                
-                            print(f"  -> [작성] {ai_reply[:50]}...")
-
+                        target_links = []
+                        for a_tag in all_links[:8]:
                             try:
-                                inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
-                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
-                                inbox.click()
-                                time.sleep(1)
+                                raw_link = a_tag.get_attribute('href')
+                                clean_link = raw_link.split('?')[0] if '?' in raw_link else raw_link
+                                title = a_tag.text.strip()
+                                if len(title) > 1: 
+                                    target_links.append((clean_link, title))
+                            except: continue
+                        
+                        print(f" -> 대상(중복포함): {len(target_links)}개")
+
+                        for link, title in target_links:
+                            if should_stop or check_stop_flag():
+                                break
                                 
-                                try: driver.find_element(By.CLASS_NAME, "comment_inbox_text").send_keys(ai_reply)
-                                except: driver.switch_to.active_element.send_keys(ai_reply)
+                            if link in visited_links:
+                                print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
+                                continue 
+                            
+                            try:
+                                print(f"\n[분석] {title[:15]}...")
+                                driver.get(link)
+                                time.sleep(random.uniform(2, 3))
                                 
-                                time.sleep(1)
-                                driver.find_element(By.XPATH, "//*[text()='등록']").click()
-                                
-                                try:
-                                    WebDriverWait(driver, 2).until(EC.alert_is_present())
-                                    driver.switch_to.alert.accept()
-                                    # 댓글 실패 기록
-                                    save_comment_history(link, title, ai_reply, success=False)
-                                    continue
+                                try: driver.switch_to.frame("cafe_main")
                                 except: pass
 
-                                print("  -> [완료]")
-                                append_history(link)
-                                visited_links.add(link)
+                                content = ""
+                                try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
+                                except:
+                                    try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
+                                    except: content = ""
                                 
-                                # 댓글 성공 기록
-                                save_comment_history(link, title, ai_reply, success=True)
-                                # 댓글 간 랜덤 딜레이 (설정 리로드로 delay_min/max 반영)
-                                bot_config = load_bot_config()
-                                min_delay_sec = bot_config.get("min_delay_seconds", 50)
-                                cph_min = bot_config.get("comments_per_hour_min")
-                                cph_max = bot_config.get("comments_per_hour_max")
-                                if cph_min and cph_max and 0 < cph_min <= cph_max:
-                                    d_max = 3600 / cph_min
-                                    d_min_cand = 3600 / cph_max
-                                    d_min = max(min_delay_sec, d_min_cand)
-                                    d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
-                                    d_max = max(d_max, d_min + 1)
-                                else:
-                                    d_min, d_max = min_delay_sec, bot_config.get("max_delay_seconds", 720)
-                                delay = random.uniform(d_min, d_max)
-                                print(f"  -> 대기 {delay:.0f}초 (랜덤)...")
-                                time.sleep(delay)
+                                result = analyze_and_generate_reply(title, content)
+                                
+                                if result is None:
+                                    print("  -> [PASS] (합격자/광고/무관함)")
+                                    append_history(link)
+                                    visited_links.add(link)
+                                    driver.switch_to.default_content()
+                                    continue
+                                
+                                ai_reply, extra = result
+                                print(f"  -> [작성] {ai_reply[:50]}...")
+
+                                try:
+                                    inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
+                                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
+                                    inbox.click()
+                                    time.sleep(1)
+                                    
+                                    try: driver.find_element(By.CLASS_NAME, "comment_inbox_text").send_keys(ai_reply)
+                                    except: driver.switch_to.active_element.send_keys(ai_reply)
+                                    
+                                    time.sleep(1)
+                                    driver.find_element(By.XPATH, "//*[text()='등록']").click()
+                                    
+                                    try:
+                                        WebDriverWait(driver, 2).until(EC.alert_is_present())
+                                        driver.switch_to.alert.accept()
+                                        # 댓글 실패 기록
+                                        save_comment_history(link, title, ai_reply, success=False, **extra)
+                                        continue
+                                    except: pass
+
+                                    print("  -> [완료]")
+                                    append_history(link)
+                                    visited_links.add(link)
+                                    
+                                    # 댓글 성공 기록
+                                    save_comment_history(link, title, ai_reply, success=True, **extra)
+                                    # 댓글 간 랜덤 딜레이 (설정 리로드로 delay_min/max 반영)
+                                    bot_config = load_bot_config()
+                                    min_delay_sec = bot_config.get("min_delay_seconds", 50)
+                                    cph_min = bot_config.get("comments_per_hour_min")
+                                    cph_max = bot_config.get("comments_per_hour_max")
+                                    if cph_min and cph_max and 0 < cph_min <= cph_max:
+                                        d_max = 3600 / cph_min
+                                        d_min_cand = 3600 / cph_max
+                                        d_min = max(min_delay_sec, d_min_cand)
+                                        d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
+                                        d_max = max(d_max, d_min + 1)
+                                    else:
+                                        d_min, d_max = min_delay_sec, bot_config.get("max_delay_seconds", 720)
+                                    delay = random.uniform(d_min, d_max)
+                                    print(f"  -> 대기 {delay:.0f}초 (랜덤)...")
+                                    time.sleep(delay)
+
+                                except Exception as e:
+                                    print(f"  -> [실패] {e}")
+                                    save_comment_history(link, title, ai_reply, success=False, **extra)
+
+                                driver.switch_to.default_content()
 
                             except Exception as e:
-                                print(f"  -> [실패] {e}")
-                                save_comment_history(link, title, ai_reply, success=False)
+                                print(f"  -> [에러] {e}")
+                                driver.switch_to.default_content()
+                                time.sleep(2)
 
-                            driver.switch_to.default_content()
-
-                        except Exception as e:
-                            print(f"  -> [에러] {e}")
-                            driver.switch_to.default_content()
-                            time.sleep(2)
-
-                except Exception as e:
-                    print(f"  -> [키워드 에러] {e}")
+                    except Exception as e:
+                        print(f"  -> [키워드 에러] {e}")
             
             if should_stop:
                 break
