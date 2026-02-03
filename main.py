@@ -55,6 +55,9 @@ def check_stop_flag():
         return True
     return False
 
+# Query Agent 기본 프롬프트 (관리 페이지에서 수정 가능)
+DEFAULT_QUERY_PROMPT = QUERY_AGENT_PROMPT.strip()
+
 # Answer Agent 기본 프롬프트 (관리 페이지에서 수정 가능)
 DEFAULT_ANSWER_PROMPT = """
 [작성 전략: 철저한 데이터 기반의 컨설팅]
@@ -79,6 +82,19 @@ DEFAULT_ANSWER_PROMPT = """
    - **중요** 생성한 댓글이 명확하게 도움되지 않거나, 학생이 공격적으로 느낄 수 있다고 느껴지면 빈 배열을 반환하세요.
 """
 
+
+def load_query_prompt():
+    """bot_prompts.json에서 Query Agent 프롬프트 로드. 없거나 비어 있으면 기본값."""
+    if os.path.exists(BOT_PROMPTS_FILE):
+        try:
+            with open(BOT_PROMPTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                p = (data.get("query_prompt") or "").strip()
+                if p:
+                    return p
+        except Exception:
+            pass
+    return DEFAULT_QUERY_PROMPT
 
 def load_answer_prompt():
     """bot_prompts.json에서 Answer Agent 프롬프트 로드. 없거나 비어 있으면 기본값."""
@@ -430,7 +446,8 @@ def generate_function_calls(title, content):
         None: 에러 발생 시
     """
     try:
-        prompt = f"""{QUERY_AGENT_PROMPT}
+        query_instruction = load_query_prompt()
+        prompt = f"""{query_instruction}
 
 [게시글]
 제목: {title}
