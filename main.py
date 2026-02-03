@@ -38,6 +38,7 @@ BOT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "bot_config.json")
 BOT_PROMPTS_FILE = os.path.join(SCRIPT_DIR, "bot_prompts.json")
 COMMENT_HISTORY_FILE = os.path.join(SCRIPT_DIR, "comment_history.json")
 DRY_RUN_HISTORY_FILE = os.path.join(SCRIPT_DIR, "dry_run_history.json")
+SKIP_LINKS_FILE = os.path.join(SCRIPT_DIR, "skip_links.json")
 STOP_FLAG_FILE = os.path.join(SCRIPT_DIR, ".stop_bot")
 
 # Headless 모드 (서버용)
@@ -690,22 +691,68 @@ def append_history(link):
     except: pass
 
 
+def extract_article_id(url):
+    """URL에서 article ID 추출 (다양한 형식 지원)
+    
+    지원 형식:
+    - https://cafe.naver.com/f-e/cafes/10197921/articles/29429119
+    - https://cafe.naver.com/suhui/29429119
+    - https://cafe.naver.com/suhui/29429119?art=...
+    """
+    import re
+    # 숫자만 추출 (마지막 숫자 그룹이 article ID)
+    # f-e 형식: /articles/29429119
+    match = re.search(r'/articles/(\d+)', url)
+    if match:
+        return match.group(1)
+    
+    # 일반 형식: /카페명/29429119 또는 /카페명/29429119?...
+    match = re.search(r'/([a-zA-Z0-9_]+)/(\d+)(?:\?|$)', url)
+    if match:
+        return match.group(2)
+    
+    return None
+
+
 def is_already_commented(link):
-    """comment_history.json에서 이미 댓글 단 글인지 확인 (가실행 기록 제외)"""
+    """comment_history.json 및 skip_links.json에서 이미 처리한 글인지 확인"""
     # 가실행 모드에서는 중복 체크 안 함
     if DRY_RUN:
         return False
     
-    if not os.path.exists(COMMENT_HISTORY_FILE):
-        return False
-    try:
-        with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
-            history = json.load(f)
-            for item in history:
-                if item.get("post_url") == link and item.get("success"):
-                    return True
-    except:
-        pass
+    # 입력 링크에서 article ID 추출
+    input_article_id = extract_article_id(link)
+    if not input_article_id:
+        # ID 추출 실패 시 원본 비교
+        input_article_id = link
+    
+    # 1. comment_history.json 체크
+    if os.path.exists(COMMENT_HISTORY_FILE):
+        try:
+            with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+                for item in history:
+                    stored_url = item.get("post_url", "")
+                    stored_article_id = extract_article_id(stored_url) or stored_url
+                    
+                    # article ID로 비교
+                    if stored_article_id == input_article_id and item.get("success"):
+                        return True
+        except:
+            pass
+    
+    # 2. skip_links.json 체크 (수동 스킵 링크)
+    if os.path.exists(SKIP_LINKS_FILE):
+        try:
+            with open(SKIP_LINKS_FILE, "r", encoding="utf-8") as f:
+                skip_links = json.load(f)
+                for item in skip_links:
+                    if item.get("article_id") == input_article_id:
+                        print(f"  -> [Skip] 수동 스킵 링크입니다.")
+                        return True
+        except:
+            pass
+    
     return False
 
 # ==========================================
