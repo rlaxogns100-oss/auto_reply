@@ -16,6 +16,7 @@ bot_prompts.json
 # ?? ??
 visited_history.txt
 comment_history.json
+dry_run_history.json
 
 # ?? ???
 .stop_bot

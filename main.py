@@ -37,6 +37,7 @@ COOKIE_FILE = os.path.join(SCRIPT_DIR, "naver_cookies.pkl")
 BOT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "bot_config.json")
 BOT_PROMPTS_FILE = os.path.join(SCRIPT_DIR, "bot_prompts.json")
 COMMENT_HISTORY_FILE = os.path.join(SCRIPT_DIR, "comment_history.json")
+DRY_RUN_HISTORY_FILE = os.path.join(SCRIPT_DIR, "dry_run_history.json")
 STOP_FLAG_FILE = os.path.join(SCRIPT_DIR, ".stop_bot")
 
 # Headless 모드 (서버용)
@@ -108,11 +109,18 @@ def load_bot_config():
 
 def save_comment_history(post_url, post_title, comment_content, success=True,
                          post_content=None, query=None, function_result=None):
-    """댓글 기록 저장 (원글/쿼리/함수결과는 관리 페이지 5열 표시용)"""
+    """댓글 기록 저장 (가실행 모드는 별도 파일에 기록)"""
+    
+    # 가실행 모드는 별도 파일에 기록
+    if DRY_RUN:
+        history_file = DRY_RUN_HISTORY_FILE
+    else:
+        history_file = COMMENT_HISTORY_FILE
+    
     history = []
-    if os.path.exists(COMMENT_HISTORY_FILE):
+    if os.path.exists(history_file):
         try:
-            with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            with open(history_file, "r", encoding="utf-8") as f:
                 history = json.load(f)
         except:
             history = []
@@ -122,7 +130,8 @@ def save_comment_history(post_url, post_title, comment_content, success=True,
         "post_url": post_url,
         "post_title": post_title,
         "comment": comment_content,
-        "success": success
+        "success": success,
+        "dry_run": DRY_RUN  # 가실행 여부 표시
     }
     if post_content is not None:
         record["post_content"] = post_content
@@ -136,7 +145,7 @@ def save_comment_history(post_url, post_title, comment_content, success=True,
     if len(history) > 500:
         history = history[-500:]
     
-    with open(COMMENT_HISTORY_FILE, "w", encoding="utf-8") as f:
+    with open(history_file, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 def load_cookies(driver):
@@ -555,8 +564,8 @@ def format_rag_context(rag_results):
         
         context_parts.append(f"\n=== 관련 입시 정보 ({result.get('university', '전체')}) ===")
         
-        for i, chunk in enumerate(chunks[:5], 1):  # 상위 5개 청크만 사용
-            content = chunk.get("content", "")[:500]  # 각 청크 500자 제한
+        for i, chunk in enumerate(chunks[:10], 1):  # 상위 10개 청크 사용
+            content = chunk.get("content", "")  # 전체 내용 전달 (제한 제거)
             context_parts.append(f"[{i}] {content}")
     
     return "\n".join(context_parts) if context_parts else ""
@@ -653,7 +662,11 @@ def load_history():
     except: return set()
 
 def append_history(link):
-    """방문 기록 추가 (중복 방지)"""
+    """방문 기록 추가 (중복 방지) - 가실행 모드는 기록 안 함"""
+    # 가실행 모드는 visited_history에 기록하지 않음
+    if DRY_RUN:
+        return
+    
     try:
         # 이미 있는지 확인
         existing = load_history()
@@ -665,7 +678,11 @@ def append_history(link):
 
 
 def is_already_commented(link):
-    """comment_history.json에서 이미 댓글 단 글인지 확인"""
+    """comment_history.json에서 이미 댓글 단 글인지 확인 (가실행 기록 제외)"""
+    # 가실행 모드에서는 중복 체크 안 함
+    if DRY_RUN:
+        return False
+    
     if not os.path.exists(COMMENT_HISTORY_FILE):
         return False
     try:
