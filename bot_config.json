@@ -1,6 +1,0 @@
-{
-  "min_delay_seconds": 50,
-  "comments_per_hour_min": 5,
-  "comments_per_hour_max": 10,
-  "rest_minutes": 3
-}
