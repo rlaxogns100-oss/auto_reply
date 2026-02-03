@@ -553,14 +553,25 @@ def format_rag_context(rag_results):
     RAG 결과를 프롬프트에 포함할 문자열로 포맷팅합니다.
     """
     if not rag_results:
+        print("  -> [RAG] rag_results가 비어있음")
         return ""
     
     context_parts = []
     
+    print(f"  -> [RAG DEBUG] rag_results keys: {list(rag_results.keys())}")
+    
     for key, result in rag_results.items():
         chunks = result.get("chunks", [])
+        print(f"  -> [RAG DEBUG] {key}: {len(chunks)}개 청크")
+        
         if not chunks:
             continue
+        
+        # 첫 번째 청크 구조 확인
+        if chunks:
+            first_chunk = chunks[0]
+            print(f"  -> [RAG DEBUG] 첫 청크 keys: {list(first_chunk.keys())}")
+            print(f"  -> [RAG DEBUG] 첫 청크 content 길이: {len(first_chunk.get('content', ''))}")
         
         context_parts.append(f"\n=== 관련 입시 정보 ({result.get('university', '전체')}) ===")
         
@@ -568,7 +579,9 @@ def format_rag_context(rag_results):
             content = chunk.get("content", "")  # 전체 내용 전달 (제한 제거)
             context_parts.append(f"[{i}] {content}")
     
-    return "\n".join(context_parts) if context_parts else ""
+    final_context = "\n".join(context_parts) if context_parts else ""
+    print(f"  -> [RAG DEBUG] 최종 컨텍스트 길이: {len(final_context)}자")
+    return final_context
 
 
 # ==========================================
