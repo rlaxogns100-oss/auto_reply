@@ -23,6 +23,12 @@ from selenium.common.exceptions import UnexpectedAlertPresentException, NoAlertP
 import config
 
 # ==========================================
+# [DRY RUN 모드]
+# ==========================================
+# 환경 변수로 제어: DRY_RUN=true면 댓글을 실제로 달지 않고 생성만 함
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
+# ==========================================
 # [서버용 설정]
 # ==========================================
 # 스크립트 디렉토리 기준으로 경로 설정
@@ -700,6 +706,10 @@ def run_search_bot():
             return
         
         print("[봇] 봇 시작! (종료: Ctrl+C 또는 .stop_bot 파일 생성)")
+        if DRY_RUN:
+            print("=" * 60)
+            print("🔍 [가실행 모드] 댓글을 실제로 달지 않고 생성만 합니다")
+            print("=" * 60)
 
         while not should_stop:
             # 종료 플래그 확인
@@ -795,31 +805,41 @@ def run_search_bot():
                                 print(f"  -> [작성] {ai_reply[:50]}...")
 
                                 try:
-                                    inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
-                                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
-                                    inbox.click()
-                                    time.sleep(1)
-                                    
-                                    try: driver.find_element(By.CLASS_NAME, "comment_inbox_text").send_keys(ai_reply)
-                                    except: driver.switch_to.active_element.send_keys(ai_reply)
-                                    
-                                    time.sleep(1)
-                                    driver.find_element(By.XPATH, "//*[text()='등록']").click()
-                                    
-                                    try:
-                                        WebDriverWait(driver, 2).until(EC.alert_is_present())
-                                        driver.switch_to.alert.accept()
-                                        # 댓글 실패 기록
-                                        save_comment_history(link, title, ai_reply, success=False, **extra)
-                                        continue
-                                    except: pass
+                                    if DRY_RUN:
+                                        # 가실행 모드: 댓글을 실제로 달지 않음
+                                        print("  -> [가실행] 댓글 생성 완료 (실제 등록하지 않음)")
+                                        print(f"     생성된 댓글: {ai_reply[:100]}...")
+                                        # 히스토리와 로그는 정상 기록
+                                        append_history(link)
+                                        visited_links.add(link)
+                                        save_comment_history(link, title, ai_reply, success=True, **extra)
+                                    else:
+                                        # 일반 모드: 실제로 댓글 등록
+                                        inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
+                                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
+                                        inbox.click()
+                                        time.sleep(1)
+                                        
+                                        try: driver.find_element(By.CLASS_NAME, "comment_inbox_text").send_keys(ai_reply)
+                                        except: driver.switch_to.active_element.send_keys(ai_reply)
+                                        
+                                        time.sleep(1)
+                                        driver.find_element(By.XPATH, "//*[text()='등록']").click()
+                                        
+                                        try:
+                                            WebDriverWait(driver, 2).until(EC.alert_is_present())
+                                            driver.switch_to.alert.accept()
+                                            # 댓글 실패 기록
+                                            save_comment_history(link, title, ai_reply, success=False, **extra)
+                                            continue
+                                        except: pass
 
-                                    print("  -> [완료]")
-                                    append_history(link)
-                                    visited_links.add(link)
-                                    
-                                    # 댓글 성공 기록
-                                    save_comment_history(link, title, ai_reply, success=True, **extra)
+                                        print("  -> [완료]")
+                                        append_history(link)
+                                        visited_links.add(link)
+                                        
+                                        # 댓글 성공 기록
+                                        save_comment_history(link, title, ai_reply, success=True, **extra)
                                     # 댓글 간 랜덤 딜레이 (설정 리로드로 delay_min/max 반영)
                                     bot_config = load_bot_config()
                                     min_delay_sec = bot_config.get("min_delay_seconds", 50)
