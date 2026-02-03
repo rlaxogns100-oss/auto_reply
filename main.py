@@ -653,10 +653,30 @@ def load_history():
     except: return set()
 
 def append_history(link):
+    """방문 기록 추가 (중복 방지)"""
     try:
+        # 이미 있는지 확인
+        existing = load_history()
+        if link in existing:
+            return  # 이미 있으면 추가하지 않음
         with open(HISTORY_FILE, "a", encoding="utf-8") as f:
             f.write(link + "\n")
     except: pass
+
+
+def is_already_commented(link):
+    """comment_history.json에서 이미 댓글 단 글인지 확인"""
+    if not os.path.exists(COMMENT_HISTORY_FILE):
+        return False
+    try:
+        with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+            for item in history:
+                if item.get("post_url") == link and item.get("success"):
+                    return True
+    except:
+        pass
+    return False
 
 # ==========================================
 # [메인 로봇]
@@ -789,7 +809,13 @@ def run_search_bot():
                                 
                             if link in visited_links:
                                 print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
-                                continue 
+                                continue
+                            
+                            # 추가 중복 체크: comment_history.json에서도 확인
+                            if is_already_commented(link):
+                                print(f" -> [Skip] 이미 댓글 단 글입니다. ({title[:10]}...)")
+                                visited_links.add(link)
+                                continue
                             
                             try:
                                 print(f"\n[분석] {title[:15]}...")
