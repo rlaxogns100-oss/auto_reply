@@ -1397,68 +1397,68 @@ def run_search_bot():
                             visited_links.add(link)
                             
                             try:
-                            print(f"\n[분석] {title[:15]}...")
-                            driver.get(link)
-                            time.sleep(random.uniform(1, 2))  # 빠른 크롤링
-                            
-                            try: driver.switch_to.frame("cafe_main")
-                            except: pass
+                                print(f"\n[분석] {title[:15]}...")
+                                driver.get(link)
+                                time.sleep(random.uniform(1, 2))  # 빠른 크롤링
+                                
+                                try: driver.switch_to.frame("cafe_main")
+                                except: pass
 
-                            # ⚠️ 중요: 내 댓글이 이미 있는지 확인 (크롤링 단계 체크)
-                            if check_my_comment_exists(driver):
-                                print("  -> [PASS] 이미 내 댓글이 있는 글입니다.")
-                                driver.switch_to.default_content()
-                                continue
+                                # ⚠️ 중요: 내 댓글이 이미 있는지 확인 (크롤링 단계 체크)
+                                if check_my_comment_exists(driver):
+                                    print("  -> [PASS] 이미 내 댓글이 있는 글입니다.")
+                                    driver.switch_to.default_content()
+                                    continue
 
-                            content = ""
-                            try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
-                            except:
-                                try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
-                                except: content = ""
-                            
-                            # 금지 키워드 체크
-                            if contains_banned_keyword(title, content, banned_keywords):
-                                print(f"  -> [PASS] 금지 키워드 포함 글입니다.")
-                                driver.switch_to.default_content()
-                                continue
-                            
-                            # 댓글 목록도 함께 전달하여 AI가 더블체크할 수 있도록 함
-                            existing_comments = ""
-                            try:
-                                comment_elements = driver.find_elements(By.CSS_SELECTOR, "span.text_comment, div.comment_text")
-                                if comment_elements:
-                                    existing_comments = "\n".join([c.text.strip()[:100] for c in comment_elements[:10]])
-                            except:
-                                pass
-                            
-                            result = analyze_and_generate_reply(title, content, existing_comments=existing_comments)
-                            
-                            if result is None:
-                                print("  -> [PASS] (합격자/광고/무관함/이미 댓글 있음)")
-                                # 이미 위에서 기록했으므로 여기서는 기록하지 않음
-                                driver.switch_to.default_content()
-                                continue
-                            
-                            ai_reply, extra = result
-                            print(f"  -> [작성] {ai_reply[:50]}...")
+                                content = ""
+                                try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
+                                except:
+                                    try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
+                                    except: content = ""
+                                
+                                # 금지 키워드 체크
+                                if contains_banned_keyword(title, content, banned_keywords):
+                                    print(f"  -> [PASS] 금지 키워드 포함 글입니다.")
+                                    driver.switch_to.default_content()
+                                    continue
+                                
+                                # 댓글 목록도 함께 전달하여 AI가 더블체크할 수 있도록 함
+                                existing_comments = ""
+                                try:
+                                    comment_elements = driver.find_elements(By.CSS_SELECTOR, "span.text_comment, div.comment_text")
+                                    if comment_elements:
+                                        existing_comments = "\n".join([c.text.strip()[:100] for c in comment_elements[:10]])
+                                except:
+                                    pass
+                                
+                                result = analyze_and_generate_reply(title, content, existing_comments=existing_comments)
+                                
+                                if result is None:
+                                    print("  -> [PASS] (합격자/광고/무관함/이미 댓글 있음)")
+                                    # 이미 위에서 기록했으므로 여기서는 기록하지 않음
+                                    driver.switch_to.default_content()
+                                    continue
+                                
+                                ai_reply, extra = result
+                                print(f"  -> [작성] {ai_reply[:50]}...")
 
-                            try:
-                                # 반자동 모드: 댓글을 실제로 달지 않고 pending 상태로 저장
-                                print("  -> [대기열 추가] 댓글 생성 완료 (승인 대기)")
-                                print(f"     생성된 댓글: {ai_reply[:100]}...")
-                                # 히스토리에 pending 상태로 저장 (visited_history는 이미 위에서 기록됨)
-                                save_comment_history(link, title, ai_reply, success=True, status="pending", **extra)
+                                try:
+                                    # 반자동 모드: 댓글을 실제로 달지 않고 pending 상태로 저장
+                                    print("  -> [대기열 추가] 댓글 생성 완료 (승인 대기)")
+                                    print(f"     생성된 댓글: {ai_reply[:100]}...")
+                                    # 히스토리에 pending 상태로 저장 (visited_history는 이미 위에서 기록됨)
+                                    save_comment_history(link, title, ai_reply, success=True, status="pending", **extra)
+
+                                except Exception as e:
+                                    print(f"  -> [실패] {e}")
+                                    save_comment_history(link, title, ai_reply, success=False, status="pending", **extra)
+
+                                driver.switch_to.default_content()
 
                             except Exception as e:
-                                print(f"  -> [실패] {e}")
-                                save_comment_history(link, title, ai_reply, success=False, status="pending", **extra)
-
-                            driver.switch_to.default_content()
-
-                        except Exception as e:
-                            print(f"  -> [에러] {e}")
-                            driver.switch_to.default_content()
-                            time.sleep(2)
+                                print(f"  -> [에러] {e}")
+                                driver.switch_to.default_content()
+                                time.sleep(2)
 
                     except Exception as e:
                         err_msg = str(e)
