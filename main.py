@@ -109,8 +109,15 @@ def load_bot_config():
     return default_config
 
 def save_comment_history(post_url, post_title, comment_content, success=True,
-                         post_content=None, query=None, function_result=None):
-    """댓글 기록 저장 (가실행 모드는 별도 파일에 기록)"""
+                         post_content=None, query=None, function_result=None,
+                         status="pending", comment_id=None):
+    """댓글 기록 저장 (반자동 시스템용)
+    
+    Args:
+        status: pending(대기중), approved(승인됨), cancelled(취소됨), posted(게시완료)
+        comment_id: 고유 ID (없으면 자동 생성)
+    """
+    import uuid
     
     # 가실행 모드는 별도 파일에 기록
     if DRY_RUN:
@@ -126,13 +133,18 @@ def save_comment_history(post_url, post_title, comment_content, success=True,
         except:
             history = []
     
+    now = datetime.now().isoformat()
     record = {
-        "timestamp": datetime.now().isoformat(),
+        "id": comment_id or str(uuid.uuid4()),
+        "timestamp": now,
         "post_url": post_url,
         "post_title": post_title,
         "comment": comment_content,
         "success": success,
-        "dry_run": DRY_RUN  # 가실행 여부 표시
+        "dry_run": DRY_RUN,
+        "status": status,
+        "action_history": [{"action": "created", "timestamp": now}],
+        "posted_at": None
     }
     if post_content is not None:
         record["post_content"] = post_content
@@ -148,6 +160,8 @@ def save_comment_history(post_url, post_title, comment_content, success=True,
     
     with open(history_file, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
+    
+    return record["id"]
 
 def load_cookies(driver):
     """쿠키 파일로 로그인"""
@@ -228,6 +242,9 @@ DEFAULT_KEYWORDS = [
     "중앙대", "건국대", "한국외대", "중대", "경희대",
     "동국대", "명지대", "서강대", "광운대", "선리대",
     "숭실대", "이화여대"      
+
+    # 3. 기타 키워드
+    "까요", "vs", "가능", "어디", "봐주", "조언", "상담"
 ]
 
 def load_keywords():
@@ -247,16 +264,50 @@ def load_keywords():
 BACKEND_URL = getattr(config, 'BACKEND_URL', 'http://localhost:8000')
 
 # ==========================================
+# [오프닝/클로징 멘트] 랜덤 선택
+# ==========================================
+
+# 오프닝: "AI한테 물어보니까 이렇다" (초간단 버전)
+OPENINGS = [
+    "수험생 전문 ai에 물어보니까 이러네요",
+    "입시 전용 ai 돌려보니까 이렇게 나와요",
+    "데이터 학습된 ai한테 물어본 결과입니다",
+    "수험생 ai가 분석한 내용 가져왔어요",
+    "입시 ai한테 물어보니까 답변이 이렇네요"
+]
+
+# 클로징: "구글에 uni2road 검색해라" (초간단 버전)
+CLOSINGS = [
+    "구글에 uni2road 검색해서 써 보세요",
+    "구글 검색창에 uni2road 치면 나옵니다",
+    "구글에서 uni2road 검색해서 돌려보세요",
+    "자세한건 구글에 uni2road 검색하면 떠요",
+    "무료니까 구글에 uni2road 검색해 보세요"
+]
+
+# ==========================================
 # [Query Agent] 게시글 분석 및 RAG 검색 쿼리 생성 (gemini-2.5-flash-lite)
 # ==========================================
 QUERY_AGENT_PROMPT = """당신은 대학 입시 커뮤니티 게시글을 분석하는 **Query Agent**입니다.
 
-## **대답 가능한 질문 목록** 아래에 해당하는 내용 대해서만 함수를 호출하세요. 해당하지 않는 내용은 모두 빈 배열로 반환하세요.
-
-
-## 정체성
+## 역할
+게시글을 읽고 **도움이 필요한 수험생의 질문**인지 판단한 후, 필요시 RAG 검색을 위한 함수 호출을 생성하세요.
 당신의 역할은 정보 검색을 위한 json 형식의 함수 호출입니다. 당신이 찾은 정보와 대화의 맥락을 종합하여 main agent가 최종적인 답변을 생성합니다.
 아래에 명시된 출력 형식을 지키세요. 정확한 함수를 올바르게 호출하여 정보를 검색하세요.
+
+## 🚨 1차 필터 - PASS 해야 하는 경우 (빈 배열 반환)
+다음 중 하나라도 해당되면 function_calls를 빈 배열로 반환하세요:
+1. **이미 합격한 사람**: "합격 후기", "최초합", "합격했습니다", "대학 갑니다" 등
+2. **정보 공유/자료 배포**: 질문이 아니라 팁을 알려주는 글, 자료 나눔글
+3. **광고/홍보**: 학원 홍보, 과외 모집, 스터디 모집
+4. **공지사항**: 카페 공지, 필독 등
+5. **단순 잡담**: 연애, 유머, 입시와 무관한 일상
+6. 공부법, 학교생활에 관한 질문
+7. 이외 기타 '입시요강, 입결, 대학별 점수 환산&비교' 자료를 통해 대답할 수 없는 질문.(예, 학원 추천, 커리 추천, 공부법 상담, 멘탈 상담 등)
+8. 시간상 유효하지 않은 질문(예를 들어, 2026 입시 합격 가능성에 대한 질문은 이미 결과가 나왔으므로 유효하지 않음.)
+
+## '입시요강, 입결, 대학별 점수 환산&비교' 자료를 통해 명확하게 대답 가능한 질문만 까다롭게 선정하세요. 그 외 질문은 모두 빈 배열로 반환하세요.
+
 
 
 ## 시점 동기화
@@ -646,12 +697,16 @@ def analyze_and_generate_reply(title, content, use_rag=True):
             print(f"  -> [Answer Agent] 할 말 없음/짧음 ({len(result)}자) - PASS (댓글 생략)")
             return None
         
+        # 랜덤 오프닝/클로징 선택
+        opening = random.choice(OPENINGS)
+        closing = random.choice(CLOSINGS)
+        
         # 고정 형식으로 포맷팅
-        formatted_reply = f"""수험생 전문 ai에 물어보니까 이러네요
+        formatted_reply = f"""{opening}
 
 {result}
 
-구글에 uni2road 검색해서 써 보세요""" 
+{closing}""" 
         
         # 관리 페이지 5열(원글/쿼리/함수결과/최종답변/링크) 저장용
         extra = {
@@ -756,22 +811,16 @@ def is_already_commented(link):
     return False
 
 # ==========================================
-# [메인 로봇]
+# [크롤러 봇] - 반자동 시스템: 댓글 생성만 하고 pending 상태로 저장
 # ==========================================
 def run_search_bot():
+    """크롤러 봇: 게시글을 빠르게 탐색하고 댓글을 생성하여 pending 상태로 저장"""
     global should_stop
     
     # 설정 로드
     bot_config = load_bot_config()
     rest_minutes = bot_config.get("rest_minutes", 3)
-    cph_min = bot_config.get("comments_per_hour_min")
-    cph_max = bot_config.get("comments_per_hour_max")
-    if cph_min and cph_max and 0 < cph_min <= cph_max:
-        print(f"[봇 설정] 시간당 댓글: {cph_min}~{cph_max}개, 휴식: {rest_minutes}분 (댓글 간 랜덤 딜레이 적용)")
-    else:
-        min_d = bot_config.get("min_delay_seconds", 50)
-        max_d = bot_config.get("max_delay_seconds", 720)
-        print(f"[봇 설정] 딜레이: {min_d}-{max_d}초, 휴식: {rest_minutes}분")
+    print(f"[크롤러] 반자동 모드 - 댓글 생성만 하고 실제 게시하지 않음")
     
     chrome_options = Options()
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -815,11 +864,10 @@ def run_search_bot():
             print("[봇] 로그인 실패. 종료합니다.")
             return
         
-        print("[봇] 봇 시작! (종료: Ctrl+C 또는 .stop_bot 파일 생성)")
-        if DRY_RUN:
-            print("=" * 60)
-            print("🔍 [가실행 모드] 댓글을 실제로 달지 않고 생성만 합니다")
-            print("=" * 60)
+        print("[크롤러] 봇 시작! (종료: Ctrl+C 또는 .stop_bot 파일 생성)")
+        print("=" * 60)
+        print("[반자동 모드] 댓글을 생성하여 대기열에 저장합니다")
+        print("=" * 60)
 
         while not should_stop:
             # 종료 플래그 확인
@@ -829,20 +877,7 @@ def run_search_bot():
             
             # 설정 리로드 (런타임 변경 반영)
             bot_config = load_bot_config()
-            min_delay_sec = bot_config.get("min_delay_seconds", 50)
-            cph_min = bot_config.get("comments_per_hour_min")
-            cph_max = bot_config.get("comments_per_hour_max")
             rest_minutes = bot_config.get("rest_minutes", 3)
-            # 시간당 댓글 수 범위로 랜덤 딜레이 계산 (예: 5~10개/시간 → 360~720초)
-            if cph_min and cph_max and 0 < cph_min <= cph_max:
-                delay_max = 3600 / cph_min
-                delay_min_candidate = 3600 / cph_max
-                delay_min = max(min_delay_sec, delay_min_candidate)
-                delay_min = min(delay_min, delay_max - 1) if delay_min >= delay_max else delay_min
-                delay_max = max(delay_max, delay_min + 1)
-            else:
-                delay_min = min_delay_sec
-                delay_max = bot_config.get("max_delay_seconds", 720)  # 기본 720초(시간당 5개 수준)
             
             # 검색할 게시판(메뉴) ID: 없으면 전체(0)
             menu_ids = getattr(config, "CAFE_MENU_IDS", None) or [0]
@@ -853,167 +888,129 @@ def run_search_bot():
             keywords = load_keywords()
             print(f"[INFO] 검색 키워드 {len(keywords)}개 로드됨")
             
-            for menu_id in menu_ids:
+            # 전체글보기에서만 검색 (menu_id=0)
+            for keyword in keywords:
                 if should_stop or check_stop_flag():
                     break
-                for keyword in keywords:
-                    if should_stop or check_stop_flag():
-                        break
-                        
-                    try:
-                        encoded = urllib.parse.quote(keyword)
-                        search_url = f"https://cafe.naver.com/f-e/cafes/{config.CLUB_ID}/menus/{menu_id}?viewType=L&ta=ARTICLE_COMMENT&page=1&q={encoded}"
-                        
-                        print(f"\n>>> 게시판(메뉴 {menu_id}) / 키워드: '{keyword}'")
-                        driver.get(search_url)
-                        time.sleep(random.uniform(0.5, 1) if DRY_RUN else random.uniform(3, 4))
-                        
-                        all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
-                        
-                        if not all_links: continue
+                    
+                try:
+                    encoded = urllib.parse.quote(keyword)
+                    search_url = f"https://cafe.naver.com/f-e/cafes/{config.CLUB_ID}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={encoded}"
+                    
+                    print(f"\n>>> 전체글보기 / 키워드: '{keyword}'")
+                    driver.get(search_url)
+                    time.sleep(random.uniform(1, 2))  # 빠른 크롤링
+                    
+                    all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
+                    
+                    if not all_links: continue
 
-                        target_links = []
-                        for a_tag in all_links[:8]:
-                            try:
-                                raw_link = a_tag.get_attribute('href')
-                                clean_link = raw_link.split('?')[0] if '?' in raw_link else raw_link
-                                title = a_tag.text.strip()
-                                if len(title) > 1: 
-                                    target_links.append((clean_link, title))
-                            except: continue
-                        
-                        print(f" -> 대상(중복포함): {len(target_links)}개")
+                    target_links = []
+                    for a_tag in all_links[:50]:  # 50개 글 탐색
+                        try:
+                            raw_link = a_tag.get_attribute('href')
+                            clean_link = raw_link.split('?')[0] if '?' in raw_link else raw_link
+                            title = a_tag.text.strip()
+                            if len(title) > 1: 
+                                target_links.append((clean_link, title))
+                        except: continue
+                    
+                    print(f" -> 대상(중복포함): {len(target_links)}개")
 
-                        for link, title in target_links:
-                            if should_stop or check_stop_flag():
-                                break
-                                
-                            if link in visited_links:
-                                print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
-                                continue
+                    for link, title in target_links:
+                        if should_stop or check_stop_flag():
+                            break
                             
-                            # 추가 중복 체크: comment_history.json에서도 확인
-                            if is_already_commented(link):
-                                print(f" -> [Skip] 이미 댓글 단 글입니다. ({title[:10]}...)")
+                        if link in visited_links:
+                            print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
+                            continue
+                        
+                        # 추가 중복 체크: comment_history.json에서도 확인
+                        if is_already_commented(link):
+                            print(f" -> [Skip] 이미 댓글 단 글입니다. ({title[:10]}...)")
+                            visited_links.add(link)
+                            continue
+                        
+                        try:
+                            print(f"\n[분석] {title[:15]}...")
+                            driver.get(link)
+                            time.sleep(random.uniform(1, 2))  # 빠른 크롤링
+                            
+                            try: driver.switch_to.frame("cafe_main")
+                            except: pass
+
+                            content = ""
+                            try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
+                            except:
+                                try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
+                                except: content = ""
+                            
+                            result = analyze_and_generate_reply(title, content)
+                            
+                            if result is None:
+                                print("  -> [PASS] (합격자/광고/무관함)")
+                                append_history(link)
                                 visited_links.add(link)
+                                driver.switch_to.default_content()
                                 continue
                             
+                            ai_reply, extra = result
+                            print(f"  -> [작성] {ai_reply[:50]}...")
+
                             try:
-                                print(f"\n[분석] {title[:15]}...")
-                                driver.get(link)
-                                time.sleep(random.uniform(0.5, 1) if DRY_RUN else random.uniform(2, 3))
-                                
-                                try: driver.switch_to.frame("cafe_main")
-                                except: pass
-
-                                content = ""
-                                try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
-                                except:
-                                    try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
-                                    except: content = ""
-                                
-                                result = analyze_and_generate_reply(title, content)
-                                
-                                if result is None:
-                                    print("  -> [PASS] (합격자/광고/무관함)")
-                                    append_history(link)
-                                    visited_links.add(link)
-                                    driver.switch_to.default_content()
-                                    continue
-                                
-                                ai_reply, extra = result
-                                print(f"  -> [작성] {ai_reply[:50]}...")
-
-                                try:
-                                    if DRY_RUN:
-                                        # 가실행 모드: 댓글을 실제로 달지 않음 (딜레이 없이 빠르게)
-                                        print("  -> [가실행] 댓글 생성 완료 (실제 등록하지 않음)")
-                                        print(f"     생성된 댓글: {ai_reply[:100]}...")
-                                        # 히스토리와 로그는 정상 기록
-                                        append_history(link)
-                                        visited_links.add(link)
-                                        save_comment_history(link, title, ai_reply, success=True, **extra)
-                                        # 가실행 모드: 딜레이 없이 바로 다음 글로
-                                    else:
-                                        # 일반 모드: 실제로 댓글 등록
-                                        inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
-                                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
-                                        inbox.click()
-                                        time.sleep(1)
-                                        
-                                        try: driver.find_element(By.CLASS_NAME, "comment_inbox_text").send_keys(ai_reply)
-                                        except: driver.switch_to.active_element.send_keys(ai_reply)
-                                        
-                                        time.sleep(1)
-                                        driver.find_element(By.XPATH, "//*[text()='등록']").click()
-                                        
-                                        try:
-                                            WebDriverWait(driver, 2).until(EC.alert_is_present())
-                                            driver.switch_to.alert.accept()
-                                            # 댓글 실패 기록
-                                            save_comment_history(link, title, ai_reply, success=False, **extra)
-                                            continue
-                                        except: pass
-
-                                        print("  -> [완료]")
-                                        append_history(link)
-                                        visited_links.add(link)
-                                        
-                                        # 댓글 성공 기록
-                                        save_comment_history(link, title, ai_reply, success=True, **extra)
-                                        
-                                        # 일반 모드만 댓글 간 랜덤 딜레이 적용
-                                        bot_config = load_bot_config()
-                                        min_delay_sec = bot_config.get("min_delay_seconds", 50)
-                                        cph_min = bot_config.get("comments_per_hour_min")
-                                        cph_max = bot_config.get("comments_per_hour_max")
-                                        if cph_min and cph_max and 0 < cph_min <= cph_max:
-                                            d_max = 3600 / cph_min
-                                            d_min_cand = 3600 / cph_max
-                                            d_min = max(min_delay_sec, d_min_cand)
-                                            d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
-                                            d_max = max(d_max, d_min + 1)
-                                        else:
-                                            d_min, d_max = min_delay_sec, bot_config.get("max_delay_seconds", 720)
-                                        delay = random.uniform(d_min, d_max)
-                                        print(f"  -> 대기 {delay:.0f}초 (랜덤)...")
-                                        time.sleep(delay)
-
-                                except Exception as e:
-                                    print(f"  -> [실패] {e}")
-                                    save_comment_history(link, title, ai_reply, success=False, **extra)
-
-                                driver.switch_to.default_content()
+                                # 반자동 모드: 댓글을 실제로 달지 않고 pending 상태로 저장
+                                print("  -> [대기열 추가] 댓글 생성 완료 (승인 대기)")
+                                print(f"     생성된 댓글: {ai_reply[:100]}...")
+                                # 히스토리에 pending 상태로 저장
+                                append_history(link)
+                                visited_links.add(link)
+                                save_comment_history(link, title, ai_reply, success=True, status="pending", **extra)
 
                             except Exception as e:
-                                print(f"  -> [에러] {e}")
-                                driver.switch_to.default_content()
-                                time.sleep(2)
+                                print(f"  -> [실패] {e}")
+                                save_comment_history(link, title, ai_reply, success=False, status="pending", **extra)
 
-                    except Exception as e:
-                        print(f"  -> [키워드 에러] {e}")
+                            driver.switch_to.default_content()
+
+                        except Exception as e:
+                            print(f"  -> [에러] {e}")
+                            driver.switch_to.default_content()
+                            time.sleep(2)
+
+                except Exception as e:
+                    err_msg = str(e)
+                    print(f"  -> [키워드 에러] {err_msg[:100]}")
+                    # Chrome 크래시 감지 시 재시작
+                    if "Connection refused" in err_msg or "invalid session" in err_msg.lower():
+                        print("[경고] Chrome 크래시 감지! 브라우저 재시작...")
+                        try:
+                            driver.quit()
+                        except:
+                            pass
+                        # 새 브라우저 시작
+                        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+                        wait = WebDriverWait(driver, 10)
+                        if not load_cookies(driver):
+                            print("[에러] 재로그인 실패. 종료합니다.")
+                            return
+                        print("[복구] 브라우저 재시작 완료!")
             
             if should_stop:
                 break
             
-            # 가실행 모드: 휴식 없이 바로 다음 사이클
-            if DRY_RUN:
-                print(f">>> [가실행] 휴식 없이 다음 사이클...")
-                continue
-                
+            # 크롤러 모드: 짧은 휴식 후 다음 사이클
             print(f">>> 휴식 {rest_minutes}분...")
-            # 휴식 중에도 종료 플래그 확인
             for _ in range(rest_minutes * 6):  # 10초 단위로 체크
                 if should_stop or check_stop_flag():
                     break
                 time.sleep(10)
 
     except KeyboardInterrupt:
-        print("\n[봇] 사용자 중단")
+        print("\n[크롤러] 사용자 중단")
     except Exception as e:
-        print(f"\n[봇] 예외 발생: {e}")
+        print(f"\n[크롤러] 예외 발생: {e}")
     finally:
-        print("[봇] 브라우저 종료 중...")
+        print("[크롤러] 브라우저 종료 중...")
         driver.quit()
         
         # Headless 모드에서 user-data-dir 정리
@@ -1023,11 +1020,239 @@ def run_search_bot():
                 try:
                     import shutil
                     shutil.rmtree(user_data_dir)
-                    print(f"[봇] Chrome user-data-dir 정리 완료: {user_data_dir}")
+                    print(f"[크롤러] Chrome user-data-dir 정리 완료: {user_data_dir}")
                 except Exception as e:
-                    print(f"[봇] Chrome user-data-dir 정리 실패: {e}")
+                    print(f"[크롤러] Chrome user-data-dir 정리 실패: {e}")
         
-        print("[봇] 종료 완료")
+        print("[크롤러] 종료 완료")
+
+
+# ==========================================
+# [게시 워커] - 승인된 댓글만 딜레이 적용하여 실제 게시
+# ==========================================
+POSTER_STOP_FLAG_FILE = os.path.join(SCRIPT_DIR, ".stop_poster")
+poster_should_stop = False
+
+def check_poster_stop_flag():
+    """게시 워커 정지 플래그 파일 확인"""
+    if os.path.exists(POSTER_STOP_FLAG_FILE):
+        os.remove(POSTER_STOP_FLAG_FILE)
+        return True
+    return False
+
+def load_approved_comments():
+    """승인된 댓글 목록 로드"""
+    if not os.path.exists(COMMENT_HISTORY_FILE):
+        return []
+    try:
+        with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+            return [c for c in history if c.get("status") == "approved"]
+    except:
+        return []
+
+def update_comment_status(comment_id, new_status, posted_at=None):
+    """댓글 상태 업데이트"""
+    if not os.path.exists(COMMENT_HISTORY_FILE):
+        return False
+    try:
+        with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        
+        for comment in history:
+            if comment.get("id") == comment_id:
+                comment["status"] = new_status
+                if posted_at:
+                    comment["posted_at"] = posted_at
+                # action_history에 추가
+                if "action_history" not in comment:
+                    comment["action_history"] = []
+                comment["action_history"].append({
+                    "action": new_status,
+                    "timestamp": datetime.now().isoformat()
+                })
+                break
+        
+        with open(COMMENT_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[게시워커] 상태 업데이트 실패: {e}")
+        return False
+
+def run_poster_bot():
+    """게시 워커: 승인된 댓글만 딜레이 적용하여 실제 게시"""
+    global poster_should_stop
+    poster_should_stop = False
+    
+    # 설정 로드
+    bot_config = load_bot_config()
+    min_delay_sec = bot_config.get("min_delay_seconds", 50)
+    cph_min = bot_config.get("comments_per_hour_min", 5)
+    cph_max = bot_config.get("comments_per_hour_max", 10)
+    
+    print(f"[게시워커] 시작 - 시간당 {cph_min}~{cph_max}개 댓글 게시")
+    
+    chrome_options = Options()
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    
+    if HEADLESS_MODE:
+        print("[게시워커] Headless 모드로 실행")
+        user_data_dir = os.path.join(SCRIPT_DIR, f"chrome_poster_{os.getpid()}")
+        os.makedirs(user_data_dir, exist_ok=True)
+        
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    else:
+        chrome_options.add_argument("--start-maximized")
+    
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    wait = WebDriverWait(driver, 10)
+    
+    try:
+        # 쿠키 기반 로그인
+        if not load_cookies(driver):
+            print("[게시워커] 로그인 실패. 종료합니다.")
+            return
+        
+        print("[게시워커] 로그인 성공! 승인된 댓글 게시 시작...")
+        
+        while not poster_should_stop:
+            if check_poster_stop_flag():
+                print("[게시워커] 정지 플래그 감지, 종료합니다.")
+                break
+            
+            # 승인된 댓글 로드
+            approved_comments = load_approved_comments()
+            
+            if not approved_comments:
+                print("[게시워커] 승인된 댓글 없음. 30초 후 재확인...")
+                for _ in range(6):  # 5초 단위로 체크
+                    if poster_should_stop or check_poster_stop_flag():
+                        break
+                    time.sleep(5)
+                continue
+            
+            print(f"[게시워커] 승인된 댓글 {len(approved_comments)}개 발견")
+            
+            for comment in approved_comments:
+                if poster_should_stop or check_poster_stop_flag():
+                    break
+                
+                comment_id = comment.get("id")
+                post_url = comment.get("post_url")
+                ai_reply = comment.get("comment")
+                title = comment.get("post_title", "")[:20]
+                
+                print(f"\n[게시] {title}... -> {post_url[:50]}...")
+                
+                try:
+                    # URL 형식 변환: /f-e/cafes/... 형식을 기존 형식으로 변환
+                    import re
+                    converted_url = post_url
+                    fe_match = re.search(r'/f-e/cafes/\d+/articles/(\d+)', post_url)
+                    if fe_match:
+                        article_id = fe_match.group(1)
+                        # config에서 카페 이름 가져오기
+                        converted_url = f"https://cafe.naver.com/{config.CAFE_NAME}/{article_id}"
+                        print(f"  -> URL 변환: {converted_url}")
+                    
+                    driver.get(converted_url)
+                    time.sleep(3)
+                    
+                    # iframe 전환
+                    try:
+                        driver.switch_to.frame("cafe_main")
+                    except:
+                        pass
+                    
+                    # 댓글 입력 (이전 작동 코드와 동일)
+                    inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
+                    inbox.click()
+                    time.sleep(1)
+                    
+                    try:
+                        driver.find_element(By.CLASS_NAME, "comment_inbox_text").send_keys(ai_reply)
+                    except:
+                        driver.switch_to.active_element.send_keys(ai_reply)
+                    
+                    time.sleep(1)
+                    driver.find_element(By.XPATH, "//*[text()='등록']").click()
+                    
+                    # Alert 처리
+                    try:
+                        WebDriverWait(driver, 2).until(EC.alert_is_present())
+                        driver.switch_to.alert.accept()
+                        print(f"  -> [실패] Alert 발생")
+                        update_comment_status(comment_id, "failed")
+                        driver.switch_to.default_content()
+                        continue
+                    except:
+                        pass
+                    
+                    print(f"  -> [게시 완료]")
+                    update_comment_status(comment_id, "posted", posted_at=datetime.now().isoformat())
+                    
+                    driver.switch_to.default_content()
+                    
+                    # 딜레이 적용
+                    bot_config = load_bot_config()
+                    min_delay_sec = bot_config.get("min_delay_seconds", 50)
+                    cph_min = bot_config.get("comments_per_hour_min", 5)
+                    cph_max = bot_config.get("comments_per_hour_max", 10)
+                    
+                    if cph_min and cph_max and 0 < cph_min <= cph_max:
+                        d_max = 3600 / cph_min
+                        d_min_cand = 3600 / cph_max
+                        d_min = max(min_delay_sec, d_min_cand)
+                        d_min = min(d_min, d_max - 1) if d_min >= d_max else d_min
+                        d_max = max(d_max, d_min + 1)
+                    else:
+                        d_min, d_max = min_delay_sec, 720
+                    
+                    delay = random.uniform(d_min, d_max)
+                    print(f"  -> 다음 댓글까지 {delay:.0f}초 대기...")
+                    
+                    # 대기 중에도 종료 플래그 확인
+                    for _ in range(int(delay / 5)):
+                        if poster_should_stop or check_poster_stop_flag():
+                            break
+                        time.sleep(5)
+                    
+                except Exception as e:
+                    print(f"  -> [에러] {type(e).__name__}: {str(e)[:200]}")
+                    import traceback
+                    traceback.print_exc()
+                    update_comment_status(comment_id, "failed")
+                    driver.switch_to.default_content()
+                    time.sleep(2)
+    
+    except KeyboardInterrupt:
+        print("\n[게시워커] 사용자 중단")
+    except Exception as e:
+        print(f"\n[게시워커] 예외 발생: {e}")
+    finally:
+        print("[게시워커] 브라우저 종료 중...")
+        driver.quit()
+        
+        if HEADLESS_MODE:
+            user_data_dir = os.path.join(SCRIPT_DIR, f"chrome_poster_{os.getpid()}")
+            if os.path.exists(user_data_dir):
+                try:
+                    import shutil
+                    shutil.rmtree(user_data_dir)
+                except:
+                    pass
+        
+        print("[게시워커] 종료 완료")
 
 if __name__ == "__main__":
     run_search_bot()
