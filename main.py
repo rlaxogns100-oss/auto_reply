@@ -155,19 +155,33 @@ def format_training_examples(examples, max_examples=78):
 # ==========================================
 # [학습 데이터] comment_history.json에서 실시간 로드
 # ==========================================
+# 학습 데이터 공유 카페 목록 (수만휘, 수험생카페, 맘카페)
+SHARED_TRAINING_CAFES = ["suhui", "pnmath", "gangmok"]
+
 def load_comment_history_for_training():
-    """comment_history.json에서 학습용 데이터 로드 (원본 훼손 없이 복사하여 사용)"""
-    if not os.path.exists(COMMENT_HISTORY_FILE):
-        return []
+    """
+    여러 카페의 comment_history.json에서 학습용 데이터 로드 (원본 훼손 없이 복사하여 사용)
+    - 수만휘, 수험생카페, 맘카페의 학습 데이터를 공유하여 사용
+    """
+    all_history = []
+    cafes_dir = os.path.join(SCRIPT_DIR, "cafes")
     
-    try:
-        with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
-            history = json.load(f)
-        # 원본 훼손 방지: 깊은 복사
-        return copy.deepcopy(history)
-    except Exception as e:
-        print(f"  -> [학습 데이터] comment_history 로드 실패: {e}")
-        return []
+    for cafe_id in SHARED_TRAINING_CAFES:
+        history_file = os.path.join(cafes_dir, cafe_id, "comment_history.json")
+        if not os.path.exists(history_file):
+            continue
+        
+        try:
+            with open(history_file, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            # 원본 훼손 방지: 깊은 복사 후 추가
+            all_history.extend(copy.deepcopy(history))
+        except Exception as e:
+            print(f"  -> [학습 데이터] {cafe_id} comment_history 로드 실패: {e}")
+            continue
+    
+    print(f"  -> [학습 데이터] 총 {len(all_history)}개 로드 (카페: {', '.join(SHARED_TRAINING_CAFES)})")
+    return all_history
 
 
 def get_answer_agent_examples(max_good=5, max_bad=5):
