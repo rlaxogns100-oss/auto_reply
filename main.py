@@ -8,8 +8,10 @@ import requests
 import signal
 import sys
 import pickle
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
+from google import genai as genai_client_module
+from google.genai import types as genai_types
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -123,6 +125,113 @@ def format_training_examples(examples, max_examples=78):
             formatted_parts.append(f"[예시 {i}]\n질문: {title}\n답변: {comment}")
     
     return "\n\n".join(formatted_parts)
+
+
+# ==========================================
+# [Context Caching] 학습 데이터 캐싱
+# ==========================================
+# 전역 변수
+training_cache = None
+genai_client = None
+CACHE_MODEL = "models/gemini-2.5-flash-lite-001"
+
+def initialize_genai_client():
+    """Google GenAI 클라이언트 초기화"""
+    global genai_client
+    if genai_client is None:
+        genai_client = genai_client_module.Client(api_key=config.GEMINI_API_KEY)
+    return genai_client
+
+def get_or_create_training_cache():
+    """학습 데이터 캐시 가져오기 또는 생성 (24시간 TTL)"""
+    global training_cache, genai_client
+    
+    try:
+        # 클라이언트 초기화
+        client = initialize_genai_client()
+        
+        # 기존 캐시 확인 (만료되지 않은 것)
+        if training_cache is not None:
+            try:
+                # 캐시가 아직 유효한지 확인
+                cache_info = client.caches.get(name=training_cache.name)
+                if cache_info:
+                    print(f"  -> [캐시] 기존 캐시 사용: {training_cache.name}")
+                    return training_cache
+            except Exception as e:
+                print(f"  -> [캐시] 기존 캐시 만료됨, 재생성 필요: {e}")
+                training_cache = None
+        
+        # 학습 예시 로드 및 포맷팅
+        examples = load_training_examples()
+        if not examples:
+            print("  -> [캐시] 학습 데이터 없음, 캐시 생성 건너뜀")
+            return None
+        
+        formatted = format_training_examples(examples)
+        if not formatted:
+            print("  -> [캐시] 포맷팅된 데이터 없음, 캐시 생성 건너뜀")
+            return None
+        
+        cache_content = f"""[📝 참고할 답변 예시]
+아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
+
+{formatted}
+"""
+        
+        # 캐시 생성 (24시간 = 86400초)
+        print(f"  -> [캐시] 새 캐시 생성 중... ({len(examples)}개 예시)")
+        training_cache = client.caches.create(
+            model=CACHE_MODEL,
+            config=genai_types.CreateCachedContentConfig(
+                display_name="training_examples_auto_reply",
+                system_instruction="당신은 수만휘 입시 커뮤니티의 입시 멘토입니다. 게시글을 읽고 도움이 되는 댓글을 작성하세요.",
+                contents=[cache_content],
+                ttl="86400s"
+            )
+        )
+        print(f"  -> [캐시] 캐시 생성 완료: {training_cache.name}")
+        return training_cache
+        
+    except Exception as e:
+        print(f"  -> [캐시] 캐시 생성 실패: {e}")
+        training_cache = None
+        return None
+
+def generate_with_cache(prompt: str):
+    """캐시를 사용하여 답변 생성"""
+    global training_cache, genai_client
+    
+    try:
+        # 캐시 가져오기 또는 생성
+        cache = get_or_create_training_cache()
+        
+        if cache and genai_client:
+            # 캐시 사용하여 생성
+            response = genai_client.models.generate_content(
+                model=CACHE_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    cached_content=cache.name
+                )
+            )
+            
+            # 캐시 히트 정보 출력
+            if hasattr(response, 'usage_metadata'):
+                meta = response.usage_metadata
+                cached_tokens = getattr(meta, 'cached_content_token_count', 0)
+                if cached_tokens > 0:
+                    print(f"  -> [캐시] 캐시 히트! (캐시 토큰: {cached_tokens})")
+            
+            return response
+        else:
+            # 캐시 없으면 기존 방식 사용
+            print("  -> [캐시] 캐시 없음, 기존 방식 사용")
+            return answer_agent.generate_content(prompt)
+            
+    except Exception as e:
+        print(f"  -> [캐시] 캐시 사용 실패, 기존 방식으로 폴백: {e}")
+        return answer_agent.generate_content(prompt)
 
 
 def load_bot_config():
@@ -252,13 +361,13 @@ except:
     query_agent = genai.GenerativeModel('gemini-2.0-flash')
     print("[INFO] Query Agent: gemini-2.0-flash (fallback)")
 
-# Answer Agent (답변 생성용) - gemini-3-flash-preview
+# Answer Agent (답변 생성용) - gemini-2.5-flash-lite
 try:
-    answer_agent = genai.GenerativeModel('gemini-3-flash-preview')
-    print("[INFO] Answer Agent: gemini-3-flash-preview")
+    answer_agent = genai.GenerativeModel('gemini-2.5-flash-lite')
+    print("[INFO] Answer Agent: gemini-2.5-flash-lite")
 except:
-    answer_agent = genai.GenerativeModel('gemini-2.5-flash')
-    print("[INFO] Answer Agent: gemini-2.5-flash (fallback)")
+    answer_agent = genai.GenerativeModel('gemini-2.0-flash')
+    print("[INFO] Answer Agent: gemini-2.0-flash (fallback)")
 
 # 기본 키워드 (bot_config.json에 없을 때 사용)
 DEFAULT_KEYWORDS = [
@@ -707,31 +816,43 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 {rag_context}
 """
         
-        # 학습 예시 로드 및 포맷팅
-        training_examples = load_training_examples()
-        examples_section = ""
-        if training_examples:
-            formatted_examples = format_training_examples(training_examples)
-            if formatted_examples:
-                examples_section = f"""
+        instruction = load_answer_prompt()
+        
+        # ==========================================
+        # Context Caching 사용 여부 확인
+        # - 캐시 사용 시: 학습 예시가 캐시에 포함되어 있으므로 프롬프트에서 제외
+        # - 캐시 미사용 시: 기존 방식대로 학습 예시를 프롬프트에 포함
+        # ==========================================
+        cache = get_or_create_training_cache()
+        
+        if cache:
+            # 캐시 사용: 학습 예시 제외한 프롬프트 (시스템 역할도 캐시에 포함됨)
+            prompt = f"""[📋 게시글 정보]
+제목: {title}
+본문: {content[:1000]}
+
+{rag_section}
+[✍️ 작성 지침]
+{instruction}
+"""
+            print("  -> [Answer Agent] 캐시 사용하여 답변 생성")
+            response = generate_with_cache(prompt)
+        else:
+            # 캐시 미사용: 기존 방식 (학습 예시 포함)
+            training_examples = load_training_examples()
+            examples_section = ""
+            if training_examples:
+                formatted_examples = format_training_examples(training_examples)
+                if formatted_examples:
+                    examples_section = f"""
 [📝 참고할 답변 예시]
 아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
 
 {formatted_examples}
 """
-                print(f"  -> [학습 데이터] {len(training_examples)}개 예시 전체 로드")
-        
-        instruction = load_answer_prompt()
-        
-        # ==========================================
-        # 프롬프트 입력 순서 정리:
-        # 1. 시스템 역할 설명
-        # 2. 학습 예시 (Few-shot learning)
-        # 3. 게시글 정보 (제목 + 본문)
-        # 4. RAG 컨텍스트 (입시 정보)
-        # 5. 작성 지침 (instruction)
-        # ==========================================
-        prompt = f"""당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
+                    print(f"  -> [학습 데이터] {len(training_examples)}개 예시 전체 로드 (캐시 없음)")
+            
+            prompt = f"""당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
 게시글을 읽고 도움이 되는 댓글을 작성하세요.
 
 {examples_section}
@@ -743,9 +864,9 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 [✍️ 작성 지침]
 {instruction}
 """
+            print("  -> [Answer Agent] 기존 방식으로 답변 생성")
+            response = answer_agent.generate_content(prompt)
         
-        # Answer Agent로 답변 생성 (gemini-3-flash-preview)
-        response = answer_agent.generate_content(prompt)
         result = (response.text or "").strip()
         result = result.replace('"', '').replace("'", "")  # 따옴표 제거
         result = result.strip()
@@ -1313,4 +1434,12 @@ def run_poster_bot():
         print("[게시워커] 종료 완료")
 
 if __name__ == "__main__":
+    # 봇 시작 시 캐시 초기화
+    print("[초기화] Context Caching 설정 중...")
+    cache = get_or_create_training_cache()
+    if cache:
+        print(f"[초기화] 캐시 준비 완료: {cache.name}")
+    else:
+        print("[초기화] 캐시 없이 기존 방식으로 실행")
+    
     run_search_bot()
