@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# 환경 변수
+.env
+
 # ??? ?? ??
 config.py
 

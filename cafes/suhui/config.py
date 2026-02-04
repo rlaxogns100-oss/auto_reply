@@ -1,7 +1,13 @@
 # 수만휘 카페 설정
+import os
+from dotenv import load_dotenv
+
+# 상위 디렉토리의 .env 로드
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+
 NAVER_ID = "horse324"
 NAVER_PW = "1qaz2wsx"
-GEMINI_API_KEY = "AIzaSyC1mu1K3nH84iuqjVE9BL6E1K7G7iaCa1k"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 CLUB_ID = "10197921"
 BACKEND_URL = "http://localhost:8000"
 
