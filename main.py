@@ -104,13 +104,16 @@ def load_training_examples():
     return []
 
 
-def format_training_examples(examples, max_examples=30):
-    """학습 예시를 프롬프트용 문자열로 포맷팅 (최대 30개)"""
+def format_training_examples(examples, max_examples=78):
+    """학습 예시를 프롬프트용 문자열로 포맷팅 (전체 78개 사용)"""
     if not examples:
         return ""
     
-    # 랜덤하게 max_examples개 선택
-    selected = random.sample(examples, min(len(examples), max_examples))
+    # 전체 사용 (78개 이하면 전부, 초과하면 랜덤 선택)
+    if len(examples) <= max_examples:
+        selected = examples
+    else:
+        selected = random.sample(examples, max_examples)
     
     formatted_parts = []
     for i, ex in enumerate(selected, 1):
@@ -708,7 +711,7 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         training_examples = load_training_examples()
         examples_section = ""
         if training_examples:
-            formatted_examples = format_training_examples(training_examples, max_examples=30)
+            formatted_examples = format_training_examples(training_examples)
             if formatted_examples:
                 examples_section = f"""
 [📝 참고할 답변 예시]
@@ -716,7 +719,7 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 
 {formatted_examples}
 """
-                print(f"  -> [학습 데이터] {len(training_examples)}개 중 30개 예시 로드")
+                print(f"  -> [학습 데이터] {len(training_examples)}개 예시 전체 로드")
         
         instruction = load_answer_prompt()
         
