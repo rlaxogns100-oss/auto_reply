@@ -212,7 +212,9 @@ def generate_with_cache(prompt: str):
                 model=CACHE_MODEL,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    cached_content=cache.name
+                    cached_content=cache.name,
+                    temperature=0.3,
+                    max_output_tokens=2048
                 )
             )
             
@@ -227,11 +229,19 @@ def generate_with_cache(prompt: str):
         else:
             # 캐시 없으면 기존 방식 사용
             print("  -> [캐시] 캐시 없음, 기존 방식 사용")
-            return answer_agent.generate_content(prompt)
+            generation_config = {
+                "temperature": 0.3,
+                "max_output_tokens": 2048
+            }
+            return answer_agent.generate_content(prompt, generation_config=generation_config)
             
     except Exception as e:
         print(f"  -> [캐시] 캐시 사용 실패, 기존 방식으로 폴백: {e}")
-        return answer_agent.generate_content(prompt)
+        generation_config = {
+            "temperature": 0.3,
+            "max_output_tokens": 2048
+        }
+        return answer_agent.generate_content(prompt, generation_config=generation_config)
 
 
 def load_bot_config():
@@ -868,7 +878,11 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 {instruction}
 """
             print("  -> [Answer Agent] 기존 방식으로 답변 생성")
-            response = answer_agent.generate_content(prompt)
+            generation_config = {
+                "temperature": 0.3,
+                "max_output_tokens": 2048
+            }
+            response = answer_agent.generate_content(prompt, generation_config=generation_config)
         
         result = (response.text or "").strip()
         result = result.replace('"', '').replace("'", "")  # 따옴표 제거
