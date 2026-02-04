@@ -825,6 +825,18 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         # ==========================================
         cache = get_or_create_training_cache()
         
+        # 학습 데이터 로드 (관리 페이지 표시용)
+        training_examples = load_training_examples()
+        examples_text = ""
+        if training_examples:
+            formatted_examples = format_training_examples(training_examples)
+            if formatted_examples:
+                examples_text = f"""[📝 참고할 답변 예시]
+아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
+
+{formatted_examples}
+"""
+        
         if cache:
             # 캐시 사용: 학습 예시 제외한 프롬프트 (시스템 역할도 캐시에 포함됨)
             prompt = f"""[📋 게시글 정보]
@@ -835,26 +847,17 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 [✍️ 작성 지침]
 {instruction}
 """
-            print("  -> [Answer Agent] 캐시 사용하여 답변 생성")
+            print(f"  -> [Answer Agent] 캐시 사용하여 답변 생성 (학습 데이터 {len(training_examples)}개)")
             response = generate_with_cache(prompt)
         else:
             # 캐시 미사용: 기존 방식 (학습 예시 포함)
-            training_examples = load_training_examples()
             examples_section = ""
-            if training_examples:
-                formatted_examples = format_training_examples(training_examples)
-                if formatted_examples:
-                    examples_section = f"""
-[📝 참고할 답변 예시]
-아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
-
-{formatted_examples}
-"""
-                    print(f"  -> [학습 데이터] {len(training_examples)}개 예시 전체 로드 (캐시 없음)")
+            if examples_text:
+                examples_section = f"\n{examples_text}"
+                print(f"  -> [학습 데이터] {len(training_examples)}개 예시 전체 로드 (캐시 없음)")
             
             prompt = f"""당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
 게시글을 읽고 도움이 되는 댓글을 작성하세요.
-
 {examples_section}
 [📋 게시글 정보]
 제목: {title}
@@ -888,10 +891,19 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 {closing}""" 
         
         # 관리 페이지 5열(원글/쿼리/함수결과/최종답변/링크) 저장용
+        # 함수결과 = RAG 컨텍스트 + 학습 데이터
+        function_result_display = ""
+        if rag_context:
+            function_result_display += rag_context
+        if examples_text:
+            if function_result_display:
+                function_result_display += "\n\n" + "="*50 + "\n\n"
+            function_result_display += examples_text
+        
         extra = {
             "post_content": (title or "") + "\n\n" + (content or "")[:2000],
             "query": json.dumps(function_calls, ensure_ascii=False),
-            "function_result": rag_context or ""
+            "function_result": function_result_display
         }
         return (formatted_reply, extra)
             
