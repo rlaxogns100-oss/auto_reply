@@ -891,28 +891,11 @@ def analyze_and_generate_reply(title, content, use_rag=True):
 {closing}""" 
         
         # 관리 페이지 5열(원글/쿼리/함수결과/최종답변/링크) 저장용
-        # 함수결과 = 학습 데이터 + RAG 컨텍스트 (항상 표시)
-        function_result_parts = []
-        
-        # 학습 데이터 (항상 포함)
-        if training_examples:
-            formatted_examples = format_training_examples(training_examples)
-            if formatted_examples:
-                function_result_parts.append(f"""[📝 참고할 답변 예시]
-아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
-
-{formatted_examples}""")
-        
-        # RAG 컨텍스트
-        if rag_context:
-            function_result_parts.append(rag_context)
-        
-        function_result_display = ("\n\n" + "="*50 + "\n\n").join(function_result_parts) if function_result_parts else ""
-        
+        # 함수결과 = RAG 컨텍스트만 (함수 출력값)
         extra = {
             "post_content": (title or "") + "\n\n" + (content or "")[:2000],
             "query": json.dumps(function_calls, ensure_ascii=False),
-            "function_result": function_result_display
+            "function_result": rag_context or ""
         }
         return (formatted_reply, extra)
             
