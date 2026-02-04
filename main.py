@@ -486,6 +486,32 @@ def load_keywords():
             pass
     return DEFAULT_KEYWORDS
 
+
+def load_banned_keywords():
+    """bot_config.json에서 금지 키워드 로드. 없으면 빈 리스트 반환."""
+    if os.path.exists(BOT_CONFIG_FILE):
+        try:
+            with open(BOT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("banned_keywords", [])
+        except Exception:
+            pass
+    return []
+
+
+def contains_banned_keyword(title, content, banned_keywords):
+    """제목이나 본문에 금지 키워드가 포함되어 있는지 확인"""
+    if not banned_keywords:
+        return False
+    
+    text = (title or "") + " " + (content or "")
+    text = text.lower()
+    
+    for keyword in banned_keywords:
+        if keyword.lower() in text:
+            return True
+    return False
+
 # Backend API URL (config에서 가져오기, 기본값: 로컬)
 BACKEND_URL = getattr(config, 'BACKEND_URL', 'http://localhost:8000')
 
@@ -1299,7 +1325,8 @@ def run_search_bot():
             
             # 키워드 로드 (매 사이클마다 새로 로드하여 실시간 반영)
             keywords = load_keywords()
-            print(f"[INFO] 검색 키워드 {len(keywords)}개 로드됨")
+            banned_keywords = load_banned_keywords()
+            print(f"[INFO] 검색 키워드 {len(keywords)}개, 금지 키워드 {len(banned_keywords)}개 로드됨")
             
             # 전체글보기에서만 검색 (menu_id=0)
             for keyword in keywords:
@@ -1368,6 +1395,12 @@ def run_search_bot():
                             except:
                                 try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
                                 except: content = ""
+                            
+                            # 금지 키워드 체크
+                            if contains_banned_keyword(title, content, banned_keywords):
+                                print(f"  -> [PASS] 금지 키워드 포함 글입니다.")
+                                driver.switch_to.default_content()
+                                continue
                             
                             # 댓글 목록도 함께 전달하여 AI가 더블체크할 수 있도록 함
                             existing_comments = ""
@@ -1481,7 +1514,7 @@ def load_approved_comments():
     except:
         return []
 
-def update_comment_status(comment_id, new_status, posted_at=None):
+def update_comment_status(comment_id, new_status, posted_at=None, is_duplicate=False):
     """댓글 상태 업데이트"""
     if not os.path.exists(COMMENT_HISTORY_FILE):
         return False
@@ -1494,6 +1527,8 @@ def update_comment_status(comment_id, new_status, posted_at=None):
                 comment["status"] = new_status
                 if posted_at:
                     comment["posted_at"] = posted_at
+                if is_duplicate:
+                    comment["is_duplicate"] = True
                 # action_history에 추가
                 if "action_history" not in comment:
                     comment["action_history"] = []
@@ -1605,8 +1640,8 @@ def run_poster_bot():
                     
                     # ⚠️ 최종 중복 체크: 실제 게시 직전에 내 댓글이 있는지 확인
                     if check_my_comment_exists(driver):
-                        print(f"  -> [Skip] 이미 내 댓글이 있음 - 게시 취소")
-                        update_comment_status(comment_id, "cancelled")
+                        print(f"  -> [Skip] 이미 내 댓글이 있음 - 게시완료(중복)로 처리")
+                        update_comment_status(comment_id, "posted", posted_at=datetime.now().isoformat(), is_duplicate=True)
                         driver.switch_to.default_content()
                         continue
                     
