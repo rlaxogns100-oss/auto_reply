@@ -8,10 +8,9 @@ import requests
 import signal
 import sys
 import pickle
+import copy
 from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
-from google import genai as genai_client_module
-from google.genai import types as genai_types
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -35,14 +34,35 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 # ==========================================
 # 스크립트 디렉토리 기준으로 경로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIE_FILE = os.path.join(SCRIPT_DIR, "naver_cookies.pkl")
-BOT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "bot_config.json")
-BOT_PROMPTS_FILE = os.path.join(SCRIPT_DIR, "bot_prompts.json")
-COMMENT_HISTORY_FILE = os.path.join(SCRIPT_DIR, "comment_history.json")
-DRY_RUN_HISTORY_FILE = os.path.join(SCRIPT_DIR, "dry_run_history.json")
-SKIP_LINKS_FILE = os.path.join(SCRIPT_DIR, "skip_links.json")
-TRAINING_EXAMPLES_FILE = os.path.join(SCRIPT_DIR, "training_examples.json")
-STOP_FLAG_FILE = os.path.join(SCRIPT_DIR, ".stop_bot")
+
+# 카페별 디렉토리 (환경변수로 전달받음, 없으면 SCRIPT_DIR 사용)
+CAFE_DIR = os.environ.get("CAFE_DIR", SCRIPT_DIR)
+CAFE_ID = os.environ.get("CAFE_ID", "suhui")
+
+# 카페별 config 로드
+if CAFE_DIR != SCRIPT_DIR:
+    # cafes/{cafe_id}/config.py에서 설정 로드
+    cafe_config_path = os.path.join(CAFE_DIR, "config.py")
+    if os.path.exists(cafe_config_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cafe_config", cafe_config_path)
+        cafe_config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cafe_config)
+        # config 모듈의 값들을 덮어쓰기
+        for attr in ['NAVER_ID', 'NAVER_PW', 'GEMINI_API_KEY', 'CLUB_ID', 'CAFE_NAME', 'CAFE_URL', 'CAFE_MENU_IDS']:
+            if hasattr(cafe_config, attr):
+                setattr(config, attr, getattr(cafe_config, attr))
+        print(f"[봇] 카페 설정 로드: {CAFE_ID} ({getattr(config, 'CAFE_NAME', 'unknown')})")
+
+# 파일 경로는 카페별 디렉토리 사용
+COOKIE_FILE = os.path.join(CAFE_DIR, "naver_cookies.pkl")
+BOT_CONFIG_FILE = os.path.join(CAFE_DIR, "bot_config.json")
+BOT_PROMPTS_FILE = os.path.join(CAFE_DIR, "bot_prompts.json")
+COMMENT_HISTORY_FILE = os.path.join(CAFE_DIR, "comment_history.json")
+DRY_RUN_HISTORY_FILE = os.path.join(CAFE_DIR, "dry_run_history.json")
+SKIP_LINKS_FILE = os.path.join(CAFE_DIR, "skip_links.json")
+TRAINING_EXAMPLES_FILE = os.path.join(CAFE_DIR, "training_examples.json")
+STOP_FLAG_FILE = os.path.join(CAFE_DIR, ".stop_bot")
 
 # Headless 모드 (서버용)
 HEADLESS_MODE = os.environ.get("HEADLESS", "true").lower() == "true"
@@ -128,120 +148,168 @@ def format_training_examples(examples, max_examples=78):
 
 
 # ==========================================
-# [Context Caching] 학습 데이터 캐싱
+# [학습 데이터] comment_history.json에서 실시간 로드
 # ==========================================
-# 전역 변수
-training_cache = None
-genai_client = None
-CACHE_MODEL = "models/gemini-2.5-flash-lite-001"
-
-def initialize_genai_client():
-    """Google GenAI 클라이언트 초기화"""
-    global genai_client
-    if genai_client is None:
-        genai_client = genai_client_module.Client(api_key=config.GEMINI_API_KEY)
-    return genai_client
-
-def get_or_create_training_cache():
-    """학습 데이터 캐시 가져오기 또는 생성 (24시간 TTL)"""
-    global training_cache, genai_client
+def load_comment_history_for_training():
+    """comment_history.json에서 학습용 데이터 로드 (원본 훼손 없이 복사하여 사용)"""
+    if not os.path.exists(COMMENT_HISTORY_FILE):
+        return []
     
     try:
-        # 클라이언트 초기화
-        client = initialize_genai_client()
-        
-        # 기존 캐시 확인 (만료되지 않은 것)
-        if training_cache is not None:
-            try:
-                # 캐시가 아직 유효한지 확인
-                cache_info = client.caches.get(name=training_cache.name)
-                if cache_info:
-                    print(f"  -> [캐시] 기존 캐시 사용: {training_cache.name}")
-                    return training_cache
-            except Exception as e:
-                print(f"  -> [캐시] 기존 캐시 만료됨, 재생성 필요: {e}")
-                training_cache = None
-        
-        # 학습 예시 로드 및 포맷팅
-        examples = load_training_examples()
-        if not examples:
-            print("  -> [캐시] 학습 데이터 없음, 캐시 생성 건너뜀")
-            return None
-        
-        formatted = format_training_examples(examples)
-        if not formatted:
-            print("  -> [캐시] 포맷팅된 데이터 없음, 캐시 생성 건너뜀")
-            return None
-        
-        cache_content = f"""[📝 참고할 답변 예시]
-아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
-
-{formatted}
-"""
-        
-        # 캐시 생성 (24시간 = 86400초)
-        print(f"  -> [캐시] 새 캐시 생성 중... ({len(examples)}개 예시)")
-        training_cache = client.caches.create(
-            model=CACHE_MODEL,
-            config=genai_types.CreateCachedContentConfig(
-                display_name="training_examples_auto_reply",
-                system_instruction="당신은 수만휘 입시 커뮤니티의 입시 멘토입니다. 게시글을 읽고 도움이 되는 댓글을 작성하세요.",
-                contents=[cache_content],
-                ttl="86400s"
-            )
-        )
-        print(f"  -> [캐시] 캐시 생성 완료: {training_cache.name}")
-        return training_cache
-        
+        with open(COMMENT_HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        # 원본 훼손 방지: 깊은 복사
+        return copy.deepcopy(history)
     except Exception as e:
-        print(f"  -> [캐시] 캐시 생성 실패: {e}")
-        training_cache = None
-        return None
+        print(f"  -> [학습 데이터] comment_history 로드 실패: {e}")
+        return []
 
-def generate_with_cache(prompt: str):
-    """캐시를 사용하여 답변 생성"""
-    global training_cache, genai_client
+
+def get_answer_agent_examples(max_good=5, max_bad=5):
+    """
+    Answer Agent용 학습 예시 가져오기
+    - 좋은 예시: 게시완료(posted), 승인됨(approved) 중 랜덤 5개
+    - 나쁜 예시: 취소됨(cancelled) 중 cancel_reason이 '최종답변부실'인 것만 랜덤 5개
+    - intro/outro는 제거하고 본문만 학습 데이터로 사용
     
-    try:
-        # 캐시 가져오기 또는 생성
-        cache = get_or_create_training_cache()
+    Returns:
+        tuple: (good_examples, bad_examples)
+    """
+    history = load_comment_history_for_training()
+    
+    def strip_intro_outro(comment):
+        """댓글에서 intro(첫 줄)와 outro(마지막 줄)를 제거하고 본문만 반환"""
+        if not comment:
+            return comment
         
-        if cache and genai_client:
-            # 캐시 사용하여 생성
-            response = genai_client.models.generate_content(
-                model=CACHE_MODEL,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    cached_content=cache.name,
-                    temperature=0.3,
-                    max_output_tokens=2048
-                )
-            )
-            
-            # 캐시 히트 정보 출력
-            if hasattr(response, 'usage_metadata'):
-                meta = response.usage_metadata
-                cached_tokens = getattr(meta, 'cached_content_token_count', 0)
-                if cached_tokens > 0:
-                    print(f"  -> [캐시] 캐시 히트! (캐시 토큰: {cached_tokens})")
-            
-            return response
+        # 빈 줄 기준으로 분리
+        paragraphs = comment.strip().split('\n\n')
+        
+        # 3개 이상의 단락이 있으면 첫 번째와 마지막 제거
+        if len(paragraphs) >= 3:
+            # 중간 단락들만 반환
+            return '\n\n'.join(paragraphs[1:-1])
+        elif len(paragraphs) == 2:
+            # 2개면 첫 번째만 제거 (마지막은 본문일 수 있음)
+            return paragraphs[1]
         else:
-            # 캐시 없으면 기존 방식 사용
-            print("  -> [캐시] 캐시 없음, 기존 방식 사용")
-            generation_config = {
-                "temperature": 0.3,
-                "max_output_tokens": 2048
-            }
-            return answer_agent.generate_content(prompt, generation_config=generation_config)
-            
-    except Exception as e:
-        print(f"  -> [캐시] 캐시 사용 실패, 기존 방식으로 폴백: {e}")
-        generation_config = {
-            "temperature": 0.3,
-            "max_output_tokens": 2048
+            # 1개면 그대로 반환
+            return comment
+    
+    # 상태별 분류
+    good_examples = []  # posted, approved
+    bad_examples = []   # cancelled with reason '최종답변부실'
+    
+    for item in history:
+        status = item.get("status", "")
+        cancel_reason = item.get("cancel_reason", "")
+        post_content = item.get("post_content", "") or item.get("post_title", "")
+        comment = item.get("comment", "")
+        
+        if not post_content or not comment:
+            continue
+        
+        # intro/outro 제거한 본문만 사용
+        comment_body = strip_intro_outro(comment)
+        
+        example = {
+            "post_content": post_content[:500],  # 원글 (500자 제한)
+            "comment": comment_body  # 최종답변 (intro/outro 제거)
         }
-        return answer_agent.generate_content(prompt, generation_config=generation_config)
+        
+        if status in ["posted", "approved"]:
+            good_examples.append(example)
+        elif status == "cancelled" and cancel_reason == "최종답변부실":
+            # 나쁜 예시는 '최종답변부실' 사유가 있는 것만
+            bad_examples.append(example)
+    
+    # 랜덤 선택
+    selected_good = random.sample(good_examples, min(max_good, len(good_examples))) if good_examples else []
+    selected_bad = random.sample(bad_examples, min(max_bad, len(bad_examples))) if bad_examples else []
+    
+    print(f"  -> [학습 데이터] 좋은 예시 {len(selected_good)}개, 나쁜 예시(최종답변부실) {len(selected_bad)}개 로드 (intro/outro 제거됨)")
+    
+    return selected_good, selected_bad
+
+
+def format_answer_agent_examples(good_examples, bad_examples):
+    """Answer Agent용 학습 예시를 프롬프트 문자열로 포맷팅"""
+    parts = []
+    
+    # 좋은 예시 (따라해야 할 것)
+    if good_examples:
+        parts.append("=" * 50)
+        parts.append("[✅ 따라해야 할 좋은 답변 예시]")
+        parts.append("아래는 승인되어 실제로 게시된 답변입니다.")
+        parts.append("특징: 3~4문장, 구체적인 숫자(입결, 모집인원 등) 인용, ~해요체")
+        parts.append("=" * 50)
+        for i, ex in enumerate(good_examples, 1):
+            parts.append(f"\n[좋은 예시 {i}]")
+            parts.append(f"원글: {ex['post_content']}")
+            parts.append(f"답변: {ex['comment']}")
+    
+    # 나쁜 예시 (따라하면 안 되는 것)
+    if bad_examples:
+        parts.append("\n" + "=" * 50)
+        parts.append("[❌ 따라하면 안 되는 나쁜 답변 예시]")
+        parts.append("아래는 취소된 답변입니다. 이런 식으로 작성하지 마세요.")
+        parts.append("문제점: 너무 김, 마크다운 사용, 번호 목록 사용, RAG 데이터 없이 일반적 조언")
+        parts.append("=" * 50)
+        for i, ex in enumerate(bad_examples, 1):
+            parts.append(f"\n[나쁜 예시 {i}]")
+            parts.append(f"원글: {ex['post_content']}")
+            parts.append(f"답변: {ex['comment']}")
+    
+    return "\n".join(parts)
+
+
+def get_query_agent_examples(max_examples=10):
+    """
+    Query Agent용 학습 예시 가져오기
+    - 취소됨(cancelled) 중 cancel_reason이 '부적절한 글'인 것 랜덤 10개
+    - 원글만 전달 (이런 글에는 답변하지 말라는 의미)
+    
+    Returns:
+        list: 부적절한 글 예시 목록
+    """
+    history = load_comment_history_for_training()
+    
+    inappropriate_posts = []
+    
+    for item in history:
+        status = item.get("status", "")
+        cancel_reason = item.get("cancel_reason", "")
+        post_content = item.get("post_content", "") or item.get("post_title", "")
+        
+        if status == "cancelled" and cancel_reason == "부적절한 글" and post_content:
+            inappropriate_posts.append({
+                "post_content": post_content[:500]  # 원글 (500자 제한)
+            })
+    
+    # 랜덤 선택
+    selected = random.sample(inappropriate_posts, min(max_examples, len(inappropriate_posts))) if inappropriate_posts else []
+    
+    print(f"  -> [Query Agent 학습] 부적절한 글 예시 {len(selected)}개 로드")
+    
+    return selected
+
+
+def format_query_agent_examples(inappropriate_posts):
+    """Query Agent용 학습 예시를 프롬프트 문자열로 포맷팅"""
+    if not inappropriate_posts:
+        return ""
+    
+    parts = []
+    parts.append("\n" + "=" * 50)
+    parts.append("[❌ 답변하면 안 되는 부적절한 글 예시]")
+    parts.append("아래와 같은 글에는 PASS 처리하세요. (빈 배열 반환)")
+    parts.append("=" * 50)
+    
+    for i, ex in enumerate(inappropriate_posts, 1):
+        parts.append(f"\n[부적절한 글 {i}]")
+        parts.append(f"원글: {ex['post_content']}")
+    
+    return "\n".join(parts)
 
 
 def load_bot_config():
@@ -657,9 +725,14 @@ DEFAULT_ANSWER_PROMPT = """
    - **중요** 생성한 댓글이 명확하게 도움되지 않거나, 학생이 공격적으로 느낄 수 있다고 느껴지면 빈 배열을 반환하세요.
 """
 
-def generate_function_calls(title, content):
+def generate_function_calls(title, content, existing_comments=""):
     """
     Query Agent로 게시글 분석 및 함수 호출 생성
+    
+    Args:
+        title: 게시글 제목
+        content: 게시글 본문
+        existing_comments: 기존 댓글 목록 (중복 체크용)
     
     Returns:
         list: function_calls 배열 (PASS인 경우 빈 배열)
@@ -667,13 +740,34 @@ def generate_function_calls(title, content):
     """
     try:
         query_instruction = load_query_prompt()
+        
+        # 부적절한 글 예시 로드 (취소됨 중 '부적절한 글' 사유)
+        inappropriate_posts = get_query_agent_examples(max_examples=20)
+        inappropriate_section = format_query_agent_examples(inappropriate_posts)
+        
+        # 기존 댓글 섹션 (중복 방지 체크)
+        existing_comments_section = ""
+        if existing_comments:
+            existing_comments_section = f"""
+[⚠️ 기존 댓글 - 중복 방지 체크]
+아래는 이 게시글에 이미 달린 댓글들입니다.
+만약 "uni2road", "입시 ai", "수험생 ai", "구글에 uni2road" 등 우리 봇이 단 것으로 보이는 댓글이 있다면,
+반드시 빈 배열을 반환하세요. 중복 댓글은 절대 금지입니다.
+특히 "하늘담아", "도군" 닉네임의 댓글이 있으면 무조건 빈 배열 반환!
+
+{existing_comments[:300]}
+"""
+        
         prompt = f"""{query_instruction}
+{inappropriate_section}
+{existing_comments_section}
 
 [게시글]
 제목: {title}
 본문: {content[:1000]}
 
 위 게시글을 분석하여 function_calls를 JSON 형식으로 생성하세요.
+⚠️ 중요: 기존 댓글에 이미 우리 봇의 댓글이 있다면 빈 배열 {{"function_calls": []}}을 반환하세요.
 """
         
         generation_config = {
@@ -690,7 +784,7 @@ def generate_function_calls(title, content):
         function_calls = result.get("function_calls", [])
         
         if not function_calls:
-            print(f"  -> [Query Agent] PASS (도움 불필요)")
+            print(f"  -> [Query Agent] PASS (도움 불필요 또는 이미 댓글 있음)")
             return []
         
         print(f"  -> [Query Agent] {len(function_calls)}개 함수 호출 생성")
@@ -759,17 +853,21 @@ def format_rag_context(rag_results):
     """
     if not rag_results:
         print("  -> [RAG] rag_results가 비어있음")
-        return ""
+        return "[검색 결과 없음]"
     
     context_parts = []
+    total_chunks = 0
     
     print(f"  -> [RAG DEBUG] rag_results keys: {list(rag_results.keys())}")
     
     for key, result in rag_results.items():
         chunks = result.get("chunks", [])
+        total_chunks += len(chunks)
         print(f"  -> [RAG DEBUG] {key}: {len(chunks)}개 청크")
         
         if not chunks:
+            # 검색했지만 결과가 없는 경우도 표시
+            context_parts.append(f"\n=== {result.get('university', '전체')} ===\n[검색 결과 없음]")
             continue
         
         # 첫 번째 청크 구조 확인
@@ -784,7 +882,10 @@ def format_rag_context(rag_results):
             content = chunk.get("content", "")  # 전체 내용 전달 (제한 제거)
             context_parts.append(f"[{i}] {content}")
     
-    final_context = "\n".join(context_parts) if context_parts else ""
+    if not context_parts:
+        return "[검색 결과 없음]"
+    
+    final_context = "\n".join(context_parts)
     print(f"  -> [RAG DEBUG] 최종 컨텍스트 길이: {len(final_context)}자")
     return final_context
 
@@ -792,11 +893,19 @@ def format_rag_context(rag_results):
 # ==========================================
 # [핵심] 게시글 분석 및 답변 생성
 # ==========================================
-def analyze_and_generate_reply(title, content, use_rag=True):
+def analyze_and_generate_reply(title, content, use_rag=True, existing_comments=""):
+    """게시글 분석 및 답변 생성
+    
+    Args:
+        title: 게시글 제목
+        content: 게시글 본문
+        use_rag: RAG 사용 여부
+        existing_comments: 기존 댓글 목록 (AI 더블체크용)
+    """
     try:
         # Query Agent로 게시글 분석 및 function_calls 생성
         print("  -> [Query Agent] 게시글 분석 중...")
-        function_calls = generate_function_calls(title, content)
+        function_calls = generate_function_calls(title, content, existing_comments=existing_comments)
         
         if function_calls is None:
             # 에러 발생
@@ -829,60 +938,49 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         instruction = load_answer_prompt()
         
         # ==========================================
-        # Context Caching 사용 여부 확인
-        # - 캐시 사용 시: 학습 예시가 캐시에 포함되어 있으므로 프롬프트에서 제외
-        # - 캐시 미사용 시: 기존 방식대로 학습 예시를 프롬프트에 포함
+        # 학습 데이터 로드 (comment_history.json에서 실시간)
+        # - 좋은 예시: 게시완료/승인됨 중 10개
+        # - 나쁜 예시: 취소됨 중 10개
         # ==========================================
-        cache = get_or_create_training_cache()
+        good_examples, bad_examples = get_answer_agent_examples(max_good=10, max_bad=10)
+        examples_section = format_answer_agent_examples(good_examples, bad_examples)
         
-        # 학습 데이터 로드 (관리 페이지 표시용)
-        training_examples = load_training_examples()
-        examples_text = ""
-        if training_examples:
-            formatted_examples = format_training_examples(training_examples)
-            if formatted_examples:
-                examples_text = f"""[📝 참고할 답변 예시]
-아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
+        instruction = load_answer_prompt()
+        
+        # 기존 댓글 섹션 (AI 더블체크용)
+        existing_comments_section = ""
+        if existing_comments:
+            existing_comments_section = f"""
+[⚠️ 기존 댓글 목록 - 중복 방지 체크]
+아래는 이 게시글에 이미 달린 댓글들입니다.
+만약 아래 댓글 중 "uni2road", "입시 ai", "수험생 ai" 등 우리 봇이 단 것으로 보이는 댓글이 있거나,
+"하늘담아", "도군" 닉네임의 댓글이 있다면 반드시 빈 문자열을 반환하세요. 
+중복 댓글은 절대 금지입니다.
 
-{formatted_examples}
+{existing_comments[:500]}
 """
         
-        if cache:
-            # 캐시 사용: 학습 예시 제외한 프롬프트 (시스템 역할도 캐시에 포함됨)
-            prompt = f"""[📋 게시글 정보]
-제목: {title}
-본문: {content[:1000]}
-
-{rag_section}
-[✍️ 작성 지침]
+        # 프롬프트 순서: 1.사용자정의 → 2.학습예시 → 3.게시글 → 4.RAG
+        prompt = f"""[✍️ 작성 지침 및 역할]
 {instruction}
-"""
-            print(f"  -> [Answer Agent] 캐시 사용하여 답변 생성 (학습 데이터 {len(training_examples)}개)")
-            response = generate_with_cache(prompt)
-        else:
-            # 캐시 미사용: 기존 방식 (학습 예시 포함)
-            examples_section = ""
-            if examples_text:
-                examples_section = f"\n{examples_text}"
-                print(f"  -> [학습 데이터] {len(training_examples)}개 예시 전체 로드 (캐시 없음)")
-            
-            prompt = f"""당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
-게시글을 읽고 도움이 되는 댓글을 작성하세요.
+
 {examples_section}
+
 [📋 게시글 정보]
 제목: {title}
 본문: {content[:1000]}
-
+{existing_comments_section}
 {rag_section}
-[✍️ 작성 지침]
-{instruction}
+
+⚠️ 중요: 기존 댓글에 이미 우리 봇(uni2road, 입시 ai, 하늘담아, 도군)의 댓글이 있다면 빈 문자열만 반환하세요.
 """
-            print("  -> [Answer Agent] 기존 방식으로 답변 생성")
-            generation_config = {
-                "temperature": 0.3,
-                "max_output_tokens": 2048
-            }
-            response = answer_agent.generate_content(prompt, generation_config=generation_config)
+        print(f"  -> [Answer Agent] 학습 데이터 로드 (좋은 예시 {len(good_examples)}개, 나쁜 예시 {len(bad_examples)}개)")
+        
+        generation_config = {
+            "temperature": 0.3,
+            "max_output_tokens": 2048
+        }
+        response = answer_agent.generate_content(prompt, generation_config=generation_config)
         
         result = (response.text or "").strip()
         result = result.replace('"', '').replace("'", "")  # 따옴표 제거
@@ -928,19 +1026,60 @@ def load_history():
     except: return set()
 
 def append_history(link):
-    """방문 기록 추가 (중복 방지) - 가실행 모드는 기록 안 함"""
+    """방문 기록 추가 (중복 방지) - 가실행 모드는 기록 안 함
+    
+    ⚠️ 중요: 이 함수는 글 분석 전에 호출되어야 Race Condition을 방지할 수 있음
+    """
     # 가실행 모드는 visited_history에 기록하지 않음
     if DRY_RUN:
         return
     
     try:
-        # 이미 있는지 확인
-        existing = load_history()
-        if link in existing:
-            return  # 이미 있으면 추가하지 않음
-        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
-            f.write(link + "\n")
-    except: pass
+        import fcntl  # 파일 락용
+        
+        # article ID 추출하여 정규화된 형태로 저장
+        article_id = extract_article_id(link)
+        
+        # 파일 락을 사용하여 동시 쓰기 방지
+        with open(HISTORY_FILE, "a+", encoding="utf-8") as f:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # 배타적 락 획득
+                
+                # 파일 처음으로 이동하여 기존 내용 확인
+                f.seek(0)
+                existing_ids = set()
+                for line in f:
+                    stored_url = line.strip()
+                    if stored_url:
+                        stored_id = extract_article_id(stored_url) or stored_url
+                        existing_ids.add(stored_id)
+                
+                # 중복 체크 (article ID 기준)
+                check_id = article_id if article_id else link
+                if check_id in existing_ids:
+                    return  # 이미 있으면 추가하지 않음
+                
+                # 파일 끝으로 이동하여 추가
+                f.seek(0, 2)  # SEEK_END
+                f.write(link + "\n")
+                f.flush()
+                
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # 락 해제
+                
+    except ImportError:
+        # fcntl이 없는 환경 (Windows 등)에서는 기존 방식 사용
+        try:
+            existing = load_history()
+            if link in existing:
+                return
+            with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+                f.write(link + "\n")
+        except:
+            pass
+    except Exception as e:
+        print(f"  -> [경고] 히스토리 기록 실패: {e}")
+        # 실패해도 계속 진행 (중복 댓글보다는 나음)
 
 
 def extract_article_id(url):
@@ -966,8 +1105,62 @@ def extract_article_id(url):
     return None
 
 
+def check_my_comment_exists(driver, my_nicknames=None):
+    """게시글 페이지에서 내 댓글이 이미 있는지 확인
+    
+    Args:
+        driver: Selenium WebDriver
+        my_nicknames: 내 닉네임 목록 (없으면 config에서 가져옴)
+        
+    Returns:
+        bool: 내 댓글이 있으면 True
+    """
+    # 닉네임 목록 가져오기
+    if my_nicknames is None:
+        # config에서 닉네임 목록 가져오기 (MY_NICKNAMES 우선, 없으면 MY_NICKNAME)
+        my_nicknames = getattr(config, 'MY_NICKNAMES', None)
+        if not my_nicknames:
+            single_nickname = getattr(config, 'MY_NICKNAME', None)
+            if single_nickname:
+                my_nicknames = [single_nickname]
+            else:
+                # 닉네임이 설정되지 않은 경우 NAVER_ID 사용
+                my_nicknames = [getattr(config, 'NAVER_ID', '')]
+    
+    # 문자열이면 리스트로 변환
+    if isinstance(my_nicknames, str):
+        my_nicknames = [my_nicknames]
+    
+    if not my_nicknames or not any(my_nicknames):
+        return False
+    
+    try:
+        # 댓글 영역에서 닉네임 찾기
+        comment_authors = driver.find_elements(By.CSS_SELECTOR, "span.comment_nickname, a.comment_nickname, span.nick, a.nick")
+        
+        for author in comment_authors:
+            author_text = author.text.strip()
+            for nickname in my_nicknames:
+                if nickname and (nickname in author_text or author_text in nickname):
+                    print(f"  -> [Skip] 이미 내 댓글이 있음 (닉네임: {author_text})")
+                    return True
+        
+        # 추가: 댓글 작성자 링크에서 ID 확인
+        comment_author_links = driver.find_elements(By.CSS_SELECTOR, "a[href*='memberid=']")
+        for link in comment_author_links:
+            href = link.get_attribute('href') or ''
+            if f"memberid={config.NAVER_ID}" in href:
+                print(f"  -> [Skip] 이미 내 댓글이 있음 (ID: {config.NAVER_ID})")
+                return True
+                
+    except Exception as e:
+        print(f"  -> [경고] 댓글 확인 중 오류: {e}")
+    
+    return False
+
+
 def is_already_commented(link):
-    """comment_history.json 및 skip_links.json에서 이미 처리한 글인지 확인"""
+    """visited_history.txt, comment_history.json, skip_links.json에서 이미 처리한 글인지 확인"""
     # 가실행 모드에서는 중복 체크 안 함
     if DRY_RUN:
         return False
@@ -978,6 +1171,21 @@ def is_already_commented(link):
         # ID 추출 실패 시 원본 비교
         input_article_id = link
     
+    # 0. visited_history.txt 체크 (가장 먼저! - 이 파일이 가장 빠르게 기록됨)
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    stored_url = line.strip()
+                    if not stored_url:
+                        continue
+                    stored_article_id = extract_article_id(stored_url) or stored_url
+                    if stored_article_id == input_article_id:
+                        print(f"  -> [Skip] visited_history.txt에 이미 있음")
+                        return True
+        except:
+            pass
+    
     # 1. comment_history.json 체크
     if os.path.exists(COMMENT_HISTORY_FILE):
         try:
@@ -987,8 +1195,9 @@ def is_already_commented(link):
                     stored_url = item.get("post_url", "")
                     stored_article_id = extract_article_id(stored_url) or stored_url
                     
-                    # article ID로 비교
-                    if stored_article_id == input_article_id and item.get("success"):
+                    # article ID로 비교 (success 여부와 관계없이 처리된 적 있으면 스킵)
+                    if stored_article_id == input_article_id:
+                        print(f"  -> [Skip] comment_history.json에 이미 있음")
                         return True
         except:
             pass
@@ -1122,11 +1331,16 @@ def run_search_bot():
                             print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
                             continue
                         
-                        # 추가 중복 체크: comment_history.json에서도 확인
+                        # 추가 중복 체크: visited_history.txt, comment_history.json, skip_links.json 모두 확인
                         if is_already_commented(link):
-                            print(f" -> [Skip] 이미 댓글 단 글입니다. ({title[:10]}...)")
+                            print(f" -> [Skip] 이미 처리한 글입니다. ({title[:10]}...)")
                             visited_links.add(link)
                             continue
+                        
+                        # ⚠️ 중요: 분석 전에 먼저 기록하여 Race Condition 방지
+                        # 다른 키워드 검색에서 같은 글이 동시에 처리되는 것을 방지
+                        append_history(link)
+                        visited_links.add(link)
                         
                         try:
                             print(f"\n[분석] {title[:15]}...")
@@ -1136,18 +1350,32 @@ def run_search_bot():
                             try: driver.switch_to.frame("cafe_main")
                             except: pass
 
+                            # ⚠️ 중요: 내 댓글이 이미 있는지 확인 (크롤링 단계 체크)
+                            if check_my_comment_exists(driver):
+                                print("  -> [PASS] 이미 내 댓글이 있는 글입니다.")
+                                driver.switch_to.default_content()
+                                continue
+
                             content = ""
                             try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
                             except:
                                 try: content = driver.find_element(By.CSS_SELECTOR, "div.ContentRenderer").text
                                 except: content = ""
                             
-                            result = analyze_and_generate_reply(title, content)
+                            # 댓글 목록도 함께 전달하여 AI가 더블체크할 수 있도록 함
+                            existing_comments = ""
+                            try:
+                                comment_elements = driver.find_elements(By.CSS_SELECTOR, "span.text_comment, div.comment_text")
+                                if comment_elements:
+                                    existing_comments = "\n".join([c.text.strip()[:100] for c in comment_elements[:10]])
+                            except:
+                                pass
+                            
+                            result = analyze_and_generate_reply(title, content, existing_comments=existing_comments)
                             
                             if result is None:
-                                print("  -> [PASS] (합격자/광고/무관함)")
-                                append_history(link)
-                                visited_links.add(link)
+                                print("  -> [PASS] (합격자/광고/무관함/이미 댓글 있음)")
+                                # 이미 위에서 기록했으므로 여기서는 기록하지 않음
                                 driver.switch_to.default_content()
                                 continue
                             
@@ -1158,9 +1386,7 @@ def run_search_bot():
                                 # 반자동 모드: 댓글을 실제로 달지 않고 pending 상태로 저장
                                 print("  -> [대기열 추가] 댓글 생성 완료 (승인 대기)")
                                 print(f"     생성된 댓글: {ai_reply[:100]}...")
-                                # 히스토리에 pending 상태로 저장
-                                append_history(link)
-                                visited_links.add(link)
+                                # 히스토리에 pending 상태로 저장 (visited_history는 이미 위에서 기록됨)
                                 save_comment_history(link, title, ai_reply, success=True, status="pending", **extra)
 
                             except Exception as e:
@@ -1370,6 +1596,13 @@ def run_poster_bot():
                     except:
                         pass
                     
+                    # ⚠️ 최종 중복 체크: 실제 게시 직전에 내 댓글이 있는지 확인
+                    if check_my_comment_exists(driver):
+                        print(f"  -> [Skip] 이미 내 댓글이 있음 - 게시 취소")
+                        update_comment_status(comment_id, "cancelled")
+                        driver.switch_to.default_content()
+                        continue
+                    
                     # 댓글 입력 (이전 작동 코드와 동일)
                     inbox = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "comment_inbox")))
                     driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", inbox)
@@ -1452,12 +1685,9 @@ def run_poster_bot():
         print("[게시워커] 종료 완료")
 
 if __name__ == "__main__":
-    # 봇 시작 시 캐시 초기화
-    print("[초기화] Context Caching 설정 중...")
-    cache = get_or_create_training_cache()
-    if cache:
-        print(f"[초기화] 캐시 준비 완료: {cache.name}")
-    else:
-        print("[초기화] 캐시 없이 기존 방식으로 실행")
+    # 봇 시작
+    print("[초기화] 학습 데이터 실시간 로드 방식으로 실행")
+    print("  - Answer Agent: 좋은 예시(게시완료/승인됨) 10개 + 나쁜 예시(취소됨) 10개")
+    print("  - Query Agent: 부적절한 글 예시 20개")
     
     run_search_bot()
