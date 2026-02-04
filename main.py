@@ -1328,55 +1328,75 @@ def run_search_bot():
             banned_keywords = load_banned_keywords()
             print(f"[INFO] 검색 키워드 {len(keywords)}개, 금지 키워드 {len(banned_keywords)}개 로드됨")
             
-            # 전체글보기에서만 검색 (menu_id=0)
-            for keyword in keywords:
+            # 멀티 카페 설정 로드 (없으면 현재 카페만)
+            multi_cafes = getattr(config, "MULTI_CAFES", None)
+            if not multi_cafes:
+                multi_cafes = [{"club_id": config.CLUB_ID, "cafe_name": config.CAFE_NAME, "name": "현재카페"}]
+            
+            print(f"[INFO] 크롤링 대상 카페: {[c['name'] for c in multi_cafes]}")
+            
+            # 각 카페별로 키워드 검색
+            for cafe_info in multi_cafes:
                 if should_stop or check_stop_flag():
                     break
-                    
-                try:
-                    encoded = urllib.parse.quote(keyword)
-                    search_url = f"https://cafe.naver.com/f-e/cafes/{config.CLUB_ID}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={encoded}"
-                    
-                    print(f"\n>>> 전체글보기 / 키워드: '{keyword}'")
-                    driver.get(search_url)
-                    time.sleep(random.uniform(1, 2))  # 빠른 크롤링
-                    
-                    all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
-                    
-                    if not all_links: continue
+                
+                current_club_id = cafe_info["club_id"]
+                current_cafe_name = cafe_info["cafe_name"]
+                cafe_display_name = cafe_info.get("name", current_cafe_name)
+                
+                print(f"\n{'='*50}")
+                print(f"[카페] {cafe_display_name} (club_id: {current_club_id})")
+                print(f"{'='*50}")
+                
+                # 전체글보기에서만 검색 (menu_id=0)
+                for keyword in keywords:
+                    if should_stop or check_stop_flag():
+                        break
+                        
+                    try:
+                        encoded = urllib.parse.quote(keyword)
+                        search_url = f"https://cafe.naver.com/f-e/cafes/{current_club_id}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={encoded}"
+                        
+                        print(f"\n>>> [{cafe_display_name}] 키워드: '{keyword}'")
+                        driver.get(search_url)
+                        time.sleep(random.uniform(1, 2))  # 빠른 크롤링
+                        
+                        all_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/articles/') and not(contains(@class, 'comment'))]")
+                        
+                        if not all_links: continue
 
-                    target_links = []
-                    for a_tag in all_links[:50]:  # 50개 글 탐색
-                        try:
-                            raw_link = a_tag.get_attribute('href')
-                            clean_link = raw_link.split('?')[0] if '?' in raw_link else raw_link
-                            title = a_tag.text.strip()
-                            if len(title) > 1: 
-                                target_links.append((clean_link, title))
-                        except: continue
-                    
-                    print(f" -> 대상(중복포함): {len(target_links)}개")
+                        target_links = []
+                        for a_tag in all_links[:50]:  # 50개 글 탐색
+                            try:
+                                raw_link = a_tag.get_attribute('href')
+                                clean_link = raw_link.split('?')[0] if '?' in raw_link else raw_link
+                                title = a_tag.text.strip()
+                                if len(title) > 1: 
+                                    target_links.append((clean_link, title))
+                            except: continue
+                        
+                        print(f" -> 대상(중복포함): {len(target_links)}개")
 
-                    for link, title in target_links:
-                        if should_stop or check_stop_flag():
-                            break
+                        for link, title in target_links:
+                            if should_stop or check_stop_flag():
+                                break
+                                
+                            if link in visited_links:
+                                print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
+                                continue
                             
-                        if link in visited_links:
-                            print(f" -> [Skip] 방금 처리한 글입니다. ({title[:10]}...)")
-                            continue
-                        
-                        # 추가 중복 체크: visited_history.txt, comment_history.json, skip_links.json 모두 확인
-                        if is_already_commented(link):
-                            print(f" -> [Skip] 이미 처리한 글입니다. ({title[:10]}...)")
+                            # 추가 중복 체크: visited_history.txt, comment_history.json, skip_links.json 모두 확인
+                            if is_already_commented(link):
+                                print(f" -> [Skip] 이미 처리한 글입니다. ({title[:10]}...)")
+                                visited_links.add(link)
+                                continue
+                            
+                            # ⚠️ 중요: 분석 전에 먼저 기록하여 Race Condition 방지
+                            # 다른 키워드 검색에서 같은 글이 동시에 처리되는 것을 방지
+                            append_history(link)
                             visited_links.add(link)
-                            continue
-                        
-                        # ⚠️ 중요: 분석 전에 먼저 기록하여 Race Condition 방지
-                        # 다른 키워드 검색에서 같은 글이 동시에 처리되는 것을 방지
-                        append_history(link)
-                        visited_links.add(link)
-                        
-                        try:
+                            
+                            try:
                             print(f"\n[분석] {title[:15]}...")
                             driver.get(link)
                             time.sleep(random.uniform(1, 2))  # 빠른 크롤링
@@ -1440,23 +1460,23 @@ def run_search_bot():
                             driver.switch_to.default_content()
                             time.sleep(2)
 
-                except Exception as e:
-                    err_msg = str(e)
-                    print(f"  -> [키워드 에러] {err_msg[:100]}")
-                    # Chrome 크래시 감지 시 재시작
-                    if "Connection refused" in err_msg or "invalid session" in err_msg.lower():
-                        print("[경고] Chrome 크래시 감지! 브라우저 재시작...")
-                        try:
-                            driver.quit()
-                        except:
-                            pass
-                        # 새 브라우저 시작
-                        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-                        wait = WebDriverWait(driver, 10)
-                        if not load_cookies(driver):
-                            print("[에러] 재로그인 실패. 종료합니다.")
-                            return
-                        print("[복구] 브라우저 재시작 완료!")
+                    except Exception as e:
+                        err_msg = str(e)
+                        print(f"  -> [키워드 에러] {err_msg[:100]}")
+                        # Chrome 크래시 감지 시 재시작
+                        if "Connection refused" in err_msg or "invalid session" in err_msg.lower():
+                            print("[경고] Chrome 크래시 감지! 브라우저 재시작...")
+                            try:
+                                driver.quit()
+                            except:
+                                pass
+                            # 새 브라우저 시작
+                            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+                            wait = WebDriverWait(driver, 10)
+                            if not load_cookies(driver):
+                                print("[에러] 재로그인 실패. 종료합니다.")
+                                return
+                            print("[복구] 브라우저 재시작 완료!")
             
             if should_stop:
                 break
