@@ -39,6 +39,7 @@ BOT_PROMPTS_FILE = os.path.join(SCRIPT_DIR, "bot_prompts.json")
 COMMENT_HISTORY_FILE = os.path.join(SCRIPT_DIR, "comment_history.json")
 DRY_RUN_HISTORY_FILE = os.path.join(SCRIPT_DIR, "dry_run_history.json")
 SKIP_LINKS_FILE = os.path.join(SCRIPT_DIR, "skip_links.json")
+TRAINING_EXAMPLES_FILE = os.path.join(SCRIPT_DIR, "training_examples.json")
 STOP_FLAG_FILE = os.path.join(SCRIPT_DIR, ".stop_bot")
 
 # Headless 모드 (서버용)
@@ -89,6 +90,36 @@ def load_answer_prompt():
         except Exception:
             pass
     return DEFAULT_ANSWER_PROMPT.strip()
+
+
+def load_training_examples():
+    """training_examples.json에서 학습 예시 로드"""
+    if os.path.exists(TRAINING_EXAMPLES_FILE):
+        try:
+            with open(TRAINING_EXAMPLES_FILE, "r", encoding="utf-8") as f:
+                examples = json.load(f)
+                return examples
+        except Exception as e:
+            print(f"  -> [학습 데이터] 로드 실패: {e}")
+    return []
+
+
+def format_training_examples(examples, max_examples=30):
+    """학습 예시를 프롬프트용 문자열로 포맷팅 (최대 30개)"""
+    if not examples:
+        return ""
+    
+    # 랜덤하게 max_examples개 선택
+    selected = random.sample(examples, min(len(examples), max_examples))
+    
+    formatted_parts = []
+    for i, ex in enumerate(selected, 1):
+        title = ex.get("post_title", "")
+        comment = ex.get("output_comment", "")
+        if title and comment and len(comment) > 30:
+            formatted_parts.append(f"[예시 {i}]\n질문: {title}\n답변: {comment}")
+    
+    return "\n\n".join(formatted_parts)
 
 
 def load_bot_config():
@@ -668,23 +699,47 @@ def analyze_and_generate_reply(title, content, use_rag=True):
         # RAG 컨텍스트 포함 프롬프트 구성
         rag_section = ""
         if rag_context:
-            rag_section = f"""
-        [📚 관련 입시 정보 (RAG)]
-        아래는 게시글과 관련된 공식 입시 정보입니다. 답변 시 참고하세요.
-        {rag_context}
-        """
+            rag_section = f"""[📚 관련 입시 정보 (RAG)]
+아래는 게시글과 관련된 공식 입시 정보입니다. 답변 시 참고하세요.
+{rag_context}
+"""
+        
+        # 학습 예시 로드 및 포맷팅
+        training_examples = load_training_examples()
+        examples_section = ""
+        if training_examples:
+            formatted_examples = format_training_examples(training_examples, max_examples=30)
+            if formatted_examples:
+                examples_section = f"""
+[📝 참고할 답변 예시]
+아래는 사장님이 승인한 좋은 답변 예시입니다. 이 스타일과 톤을 참고하여 답변하세요.
+
+{formatted_examples}
+"""
+                print(f"  -> [학습 데이터] {len(training_examples)}개 중 30개 예시 로드")
         
         instruction = load_answer_prompt()
-        prompt = f"""
-        당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
-        게시글을 읽고 도움이 되는 댓글을 작성하세요.
+        
+        # ==========================================
+        # 프롬프트 입력 순서 정리:
+        # 1. 시스템 역할 설명
+        # 2. 학습 예시 (Few-shot learning)
+        # 3. 게시글 정보 (제목 + 본문)
+        # 4. RAG 컨텍스트 (입시 정보)
+        # 5. 작성 지침 (instruction)
+        # ==========================================
+        prompt = f"""당신은 수만휘 입시 커뮤니티의 입시 멘토입니다.
+게시글을 읽고 도움이 되는 댓글을 작성하세요.
 
-        [게시글 정보]
-        제목: {title}
-        본문: {content[:1000]}
-        {rag_section}
-        {instruction}
-        """
+{examples_section}
+[📋 게시글 정보]
+제목: {title}
+본문: {content[:1000]}
+
+{rag_section}
+[✍️ 작성 지침]
+{instruction}
+"""
         
         # Answer Agent로 답변 생성 (gemini-3-flash-preview)
         response = answer_agent.generate_content(prompt)
