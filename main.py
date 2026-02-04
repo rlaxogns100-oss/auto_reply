@@ -55,7 +55,8 @@ if CAFE_DIR != SCRIPT_DIR:
         print(f"[봇] 카페 설정 로드: {CAFE_ID} ({getattr(config, 'CAFE_NAME', 'unknown')})")
 
 # 파일 경로는 카페별 디렉토리 사용
-COOKIE_FILE = os.path.join(CAFE_DIR, "naver_cookies.pkl")
+# 쿠키 파일은 환경변수로 전달받거나 카페 디렉토리에서 찾음
+COOKIE_FILE = os.environ.get("COOKIE_FILE", os.path.join(CAFE_DIR, "naver_cookies.pkl"))
 BOT_CONFIG_FILE = os.path.join(CAFE_DIR, "bot_config.json")
 BOT_PROMPTS_FILE = os.path.join(CAFE_DIR, "bot_prompts.json")
 COMMENT_HISTORY_FILE = os.path.join(CAFE_DIR, "comment_history.json")
@@ -63,6 +64,10 @@ DRY_RUN_HISTORY_FILE = os.path.join(CAFE_DIR, "dry_run_history.json")
 SKIP_LINKS_FILE = os.path.join(CAFE_DIR, "skip_links.json")
 TRAINING_EXAMPLES_FILE = os.path.join(CAFE_DIR, "training_examples.json")
 STOP_FLAG_FILE = os.path.join(CAFE_DIR, ".stop_bot")
+
+# 계정 ID (로그용)
+ACCOUNT_ID = os.environ.get("ACCOUNT_ID", "unknown")
+print(f"[봇] 계정: {ACCOUNT_ID}, 쿠키: {COOKIE_FILE}")
 
 # Headless 모드 (서버용)
 HEADLESS_MODE = os.environ.get("HEADLESS", "true").lower() == "true"
@@ -426,7 +431,7 @@ def load_cookies(driver):
 # ==========================================
 # [설정] AI 모델 및 API 키
 # ==========================================
-HISTORY_FILE = os.path.join(SCRIPT_DIR, "visited_history.txt")
+HISTORY_FILE = os.path.join(CAFE_DIR, "visited_history.txt")
 
 # config.py에서 API 키 가져오기
 genai.configure(api_key=config.GEMINI_API_KEY)
@@ -1195,9 +1200,11 @@ def is_already_commented(link):
                     stored_url = item.get("post_url", "")
                     stored_article_id = extract_article_id(stored_url) or stored_url
                     
-                    # article ID로 비교 (success 여부와 관계없이 처리된 적 있으면 스킵)
+                    # article ID로 비교 (status와 관계없이 처리된 적 있으면 스킵)
+                    # pending, approved, posted, cancelled 모두 중복으로 처리
                     if stored_article_id == input_article_id:
-                        print(f"  -> [Skip] comment_history.json에 이미 있음")
+                        status = item.get("status", "unknown")
+                        print(f"  -> [Skip] comment_history.json에 이미 있음 (status: {status})")
                         return True
         except:
             pass
