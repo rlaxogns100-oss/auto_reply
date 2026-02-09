@@ -451,10 +451,10 @@ HISTORY_FILE = os.path.join(CAFE_DIR, "visited_history.txt")
 # AI 모델 제공자 설정 (gemini 또는 azure)
 AI_MODEL_PROVIDER = getattr(config, 'AI_MODEL_PROVIDER', 'gemini')
 
-# Azure OpenAI 설정
-AZURE_OPENAI_ENDPOINT = getattr(config, 'AZURE_OPENAI_ENDPOINT', '')
-AZURE_OPENAI_API_KEY = getattr(config, 'AZURE_OPENAI_API_KEY', '')
-AZURE_OPENAI_API_VERSION = getattr(config, 'AZURE_OPENAI_API_VERSION', '2025-04-01-preview')
+# Azure OpenAI 설정 (config.py 또는 환경변수에서 로드)
+AZURE_OPENAI_ENDPOINT = getattr(config, 'AZURE_OPENAI_ENDPOINT', '') or os.getenv('AZURE_OPENAI_ENDPOINT', '')
+AZURE_OPENAI_API_KEY = getattr(config, 'AZURE_OPENAI_API_KEY', '') or os.getenv('AZURE_OPENAI_API_KEY', '')
+AZURE_OPENAI_API_VERSION = getattr(config, 'AZURE_OPENAI_API_VERSION', '2024-02-15-preview')
 AZURE_OPENAI_DEPLOYMENT = getattr(config, 'AZURE_OPENAI_DEPLOYMENT', 'gpt-5.2-chat-4')
 
 # bot_config.json에서 모델 설정 로드 (런타임 변경 지원)
@@ -542,7 +542,7 @@ def call_ai_model(prompt, is_json_response=False, temperature=0.3, max_tokens=20
                 model=AZURE_OPENAI_DEPLOYMENT,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_completion_tokens=max_tokens,
                 response_format={"type": "json_object"} if is_json_response else None
             )
             
