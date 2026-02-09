@@ -18,4 +18,4 @@ CAFE_URL = "https://cafe.naver.com/suhui"
 CAFE_MENU_IDS = [4427, 201]
 
 # 봇 닉네임 목록 (댓글 중복 체크용) - 여러 계정 사용 시 모두 등록
-MY_NICKNAMES = ["하늘담아", "도군"]
+MY_NICKNAMES = ["하늘담아", "도군", "화궁"]

@@ -11,6 +11,7 @@ import pickle
 import copy
 from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
+from openai import AzureOpenAI
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -447,24 +448,141 @@ def load_cookies(driver):
 # ==========================================
 HISTORY_FILE = os.path.join(CAFE_DIR, "visited_history.txt")
 
-# config.py에서 API 키 가져오기
+# AI 모델 제공자 설정 (gemini 또는 azure)
+AI_MODEL_PROVIDER = getattr(config, 'AI_MODEL_PROVIDER', 'gemini')
+
+# Azure OpenAI 설정
+AZURE_OPENAI_ENDPOINT = getattr(config, 'AZURE_OPENAI_ENDPOINT', '')
+AZURE_OPENAI_API_KEY = getattr(config, 'AZURE_OPENAI_API_KEY', '')
+AZURE_OPENAI_API_VERSION = getattr(config, 'AZURE_OPENAI_API_VERSION', '2025-04-01-preview')
+AZURE_OPENAI_DEPLOYMENT = getattr(config, 'AZURE_OPENAI_DEPLOYMENT', 'gpt-5.2-chat-4')
+
+# bot_config.json에서 모델 설정 로드 (런타임 변경 지원)
+def load_model_config():
+    """bot_config.json에서 AI 모델 설정 로드"""
+    global AI_MODEL_PROVIDER
+    if os.path.exists(BOT_CONFIG_FILE):
+        try:
+            with open(BOT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                provider = data.get("ai_model_provider", "").strip()
+                if provider in ["gemini", "azure"]:
+                    return provider
+        except Exception:
+            pass
+    return AI_MODEL_PROVIDER
+
+# Azure OpenAI 클라이언트 초기화
+azure_client = None
+if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY:
+    try:
+        azure_client = AzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION
+        )
+        print(f"[INFO] Azure OpenAI 클라이언트 초기화 완료 (배포: {AZURE_OPENAI_DEPLOYMENT})")
+    except Exception as e:
+        print(f"[WARNING] Azure OpenAI 클라이언트 초기화 실패: {e}")
+        azure_client = None
+
+# Gemini API 설정
 genai.configure(api_key=config.GEMINI_API_KEY)
 
-# Query Agent (RAG 검색 쿼리 생성용) - gemini-2.5-flash-lite
+# Query Agent (RAG 검색 쿼리 생성용)
+query_agent_gemini = None
 try:
-    query_agent = genai.GenerativeModel('gemini-2.5-flash-lite')
-    print("[INFO] Query Agent: gemini-2.5-flash-lite")
+    query_agent_gemini = genai.GenerativeModel('gemini-2.5-flash-lite')
+    print("[INFO] Query Agent (Gemini): gemini-2.5-flash-lite")
 except:
-    query_agent = genai.GenerativeModel('gemini-2.0-flash')
-    print("[INFO] Query Agent: gemini-2.0-flash (fallback)")
+    try:
+        query_agent_gemini = genai.GenerativeModel('gemini-2.0-flash')
+        print("[INFO] Query Agent (Gemini): gemini-2.0-flash (fallback)")
+    except:
+        print("[WARNING] Gemini Query Agent 초기화 실패")
 
-# Answer Agent (답변 생성용) - gemini-2.5-flash-lite
+# Answer Agent (답변 생성용)
+answer_agent_gemini = None
 try:
-    answer_agent = genai.GenerativeModel('gemini-2.5-flash-lite')
-    print("[INFO] Answer Agent: gemini-2.5-flash-lite")
+    answer_agent_gemini = genai.GenerativeModel('gemini-2.5-flash-lite')
+    print("[INFO] Answer Agent (Gemini): gemini-2.5-flash-lite")
 except:
-    answer_agent = genai.GenerativeModel('gemini-2.0-flash')
-    print("[INFO] Answer Agent: gemini-2.0-flash (fallback)")
+    try:
+        answer_agent_gemini = genai.GenerativeModel('gemini-2.0-flash')
+        print("[INFO] Answer Agent (Gemini): gemini-2.0-flash (fallback)")
+    except:
+        print("[WARNING] Gemini Answer Agent 초기화 실패")
+
+# 현재 사용 중인 모델 표시
+current_provider = load_model_config()
+print(f"[INFO] 현재 AI 모델 제공자: {current_provider.upper()}")
+
+
+def call_ai_model(prompt, is_json_response=False, temperature=0.3, max_tokens=2048):
+    """
+    AI 모델 호출 (Gemini 또는 Azure OpenAI)
+    
+    Args:
+        prompt: 프롬프트 문자열
+        is_json_response: JSON 응답 여부 (Query Agent용)
+        temperature: 온도 설정
+        max_tokens: 최대 토큰 수
+    
+    Returns:
+        str: AI 응답 텍스트
+        None: 에러 발생 시
+    """
+    provider = load_model_config()
+    
+    if provider == "azure" and azure_client:
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            
+            response = azure_client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"} if is_json_response else None
+            )
+            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"  -> [Azure OpenAI 에러] {e}")
+            # Fallback to Gemini
+            if query_agent_gemini or answer_agent_gemini:
+                print("  -> [Fallback] Gemini로 전환...")
+                provider = "gemini"
+            else:
+                return None
+    
+    if provider == "gemini":
+        try:
+            agent = query_agent_gemini if is_json_response else answer_agent_gemini
+            if not agent:
+                print("  -> [에러] Gemini 모델이 초기화되지 않음")
+                return None
+            
+            generation_config = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens
+            }
+            if is_json_response:
+                generation_config["response_mime_type"] = "application/json"
+            
+            response = agent.generate_content(prompt, generation_config=generation_config)
+            return (response.text or "").strip()
+        except Exception as e:
+            print(f"  -> [Gemini 에러] {e}")
+            return None
+    
+    print(f"  -> [에러] 알 수 없는 AI 제공자: {provider}")
+    return None
+
+
+# 레거시 호환성을 위한 변수 (기존 코드에서 사용)
+query_agent = query_agent_gemini
+answer_agent = answer_agent_gemini
 
 # 기본 키워드 (bot_config.json에 없을 때 사용)
 DEFAULT_KEYWORDS = [
@@ -815,14 +933,12 @@ def generate_function_calls(title, content, existing_comments=""):
 ⚠️ 중요: 기존 댓글에 이미 우리 봇의 댓글이 있다면 빈 배열 {{"function_calls": []}}을 반환하세요.
 """
         
-        generation_config = {
-            "temperature": 0.0,
-            "max_output_tokens": 2048,
-            "response_mime_type": "application/json"
-        }
+        # 새로운 통합 AI 호출 함수 사용
+        result_text = call_ai_model(prompt, is_json_response=True, temperature=0.0, max_tokens=2048)
         
-        response = query_agent.generate_content(prompt, generation_config=generation_config)
-        result_text = response.text.strip()
+        if not result_text:
+            print(f"  -> [Query Agent] AI 응답 없음")
+            return None
         
         # JSON 파싱
         result = json.loads(result_text)
@@ -840,7 +956,7 @@ def generate_function_calls(title, content, existing_comments=""):
         
     except json.JSONDecodeError as e:
         print(f"  -> [Query Agent] JSON 파싱 실패: {e}")
-        print(f"     원본: {result_text[:200]}")
+        print(f"     원본: {result_text[:200] if result_text else 'None'}")
         return None
     except Exception as e:
         print(f"  -> [Query Agent] 에러: {e}")
@@ -1021,13 +1137,13 @@ def analyze_and_generate_reply(title, content, use_rag=True, existing_comments="
 """
         print(f"  -> [Answer Agent] 학습 데이터 로드 (좋은 예시 {len(good_examples)}개, 나쁜 예시 {len(bad_examples)}개)")
         
-        generation_config = {
-            "temperature": 0.3,
-            "max_output_tokens": 2048
-        }
-        response = answer_agent.generate_content(prompt, generation_config=generation_config)
+        # 새로운 통합 AI 호출 함수 사용
+        result = call_ai_model(prompt, is_json_response=False, temperature=0.3, max_tokens=2048)
         
-        result = (response.text or "").strip()
+        if not result:
+            print(f"  -> [Answer Agent] AI 응답 없음 - PASS")
+            return None
+        
         result = result.replace('"', '').replace("'", "")  # 따옴표 제거
         result = result.strip()
         
