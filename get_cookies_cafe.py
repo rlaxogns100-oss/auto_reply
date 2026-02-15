@@ -14,6 +14,7 @@ import pickle
 import time
 import os
 import sys
+import glob
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
@@ -33,6 +34,18 @@ ACCOUNTS = {
         "naver_id": "herry0515",
     }
 }
+
+def get_chromedriver_path():
+    """webdriver-manager 캐시에서 올바른 chromedriver 경로 찾기"""
+    wdm_path = os.path.expanduser("~/.wdm/drivers/chromedriver")
+    if os.path.exists(wdm_path):
+        # chromedriver 파일 찾기 (THIRD_PARTY_NOTICES.chromedriver 제외)
+        chromedriver_paths = glob.glob(f"{wdm_path}/**/chromedriver", recursive=True)
+        valid_paths = [p for p in chromedriver_paths if not p.endswith('.chromedriver') and os.path.isfile(p)]
+        if valid_paths:
+            # 가장 최신 파일 선택
+            return max(valid_paths, key=os.path.getmtime)
+    return None
 
 def main():
     if len(sys.argv) < 2:
@@ -57,7 +70,14 @@ def main():
     print("=" * 50)
     
     # 브라우저 실행 (headless 아님 - 로그인을 위해)
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    # 먼저 캐시된 chromedriver 경로 확인
+    chromedriver_path = get_chromedriver_path()
+    if chromedriver_path:
+        print(f"캐시된 chromedriver 사용: {chromedriver_path}")
+        driver = webdriver.Chrome(service=Service(chromedriver_path))
+    else:
+        print("chromedriver 다운로드 중...")
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     
     try:
         # 네이버 로그인 페이지로 이동

@@ -652,22 +652,10 @@ BACKEND_URL = getattr(config, 'BACKEND_URL', 'http://localhost:8000')
 # ==========================================
 
 # 오프닝: "AI한테 물어보니까 이렇다" (초간단 버전)
-OPENINGS = [
-    "수험생 전문 ai에 물어보니까 이러네요",
-    "입시 전용 ai 돌려보니까 이렇게 나와요",
-    "데이터 학습된 ai한테 물어본 결과입니다",
-    "수험생 ai가 분석한 내용 가져왔어요",
-    "입시 ai한테 물어보니까 답변이 이렇네요"
-]
+OPENINGS = []
 
 # 클로징: "구글에 uni2road 검색해라" (초간단 버전)
-CLOSINGS = [
-    "구글에 uni2road 검색해서 써 보세요",
-    "구글 검색창에 uni2road 치면 나옵니다",
-    "구글에서 uni2road 검색해서 돌려보세요",
-    "자세한건 구글에 uni2road 검색하면 떠요",
-    "무료니까 구글에 uni2road 검색해 보세요"
-]
+CLOSINGS = []
 
 # ==========================================
 # [Query Agent] 게시글 분석 및 RAG 검색 쿼리 생성 (gemini-2.5-flash-lite)
@@ -934,7 +922,7 @@ def generate_function_calls(title, content, existing_comments=""):
 """
         
         # 새로운 통합 AI 호출 함수 사용
-        result_text = call_ai_model(prompt, is_json_response=True, temperature=0.0, max_tokens=2048)
+        result_text = call_ai_model(prompt, is_json_response=True, temperature=1.0, max_tokens=2048)
         
         if not result_text:
             print(f"  -> [Query Agent] AI 응답 없음")
@@ -1138,7 +1126,7 @@ def analyze_and_generate_reply(title, content, use_rag=True, existing_comments="
         print(f"  -> [Answer Agent] 학습 데이터 로드 (좋은 예시 {len(good_examples)}개, 나쁜 예시 {len(bad_examples)}개)")
         
         # 새로운 통합 AI 호출 함수 사용
-        result = call_ai_model(prompt, is_json_response=False, temperature=0.3, max_tokens=2048)
+        result = call_ai_model(prompt, is_json_response=False, temperature=1.0, max_tokens=2048)
         
         if not result:
             print(f"  -> [Answer Agent] AI 응답 없음 - PASS")
@@ -1152,16 +1140,27 @@ def analyze_and_generate_reply(title, content, use_rag=True, existing_comments="
             print(f"  -> [Answer Agent] 할 말 없음/짧음 ({len(result)}자) - PASS (댓글 생략)")
             return None
         
-        # 랜덤 오프닝/클로징 선택
-        opening = random.choice(OPENINGS)
-        closing = random.choice(CLOSINGS)
+        # 랜덤 오프닝/클로징 선택 (비어있으면 사용 안함)
+        opening = random.choice(OPENINGS) if OPENINGS else ""
+        closing = random.choice(CLOSINGS) if CLOSINGS else ""
         
         # 고정 형식으로 포맷팅
-        formatted_reply = f"""{opening}
+        if opening and closing:
+            formatted_reply = f"""{opening}
 
 {result}
 
-{closing}""" 
+{closing}"""
+        elif opening:
+            formatted_reply = f"""{opening}
+
+{result}"""
+        elif closing:
+            formatted_reply = f"""{result}
+
+{closing}"""
+        else:
+            formatted_reply = result 
         
         # 관리 페이지 5열(원글/쿼리/함수결과/최종답변/링크) 저장용
         # 함수결과 = RAG 컨텍스트만 (함수 출력값)
@@ -1264,6 +1263,94 @@ def extract_article_id(url):
         return match.group(2)
     
     return None
+
+
+def check_post_date(driver, min_year=2026, min_month=2):
+    """게시글 작성 날짜가 최소 날짜 이후인지 확인
+    
+    Args:
+        driver: Selenium WebDriver
+        min_year: 최소 연도 (기본값: 2026)
+        min_month: 최소 월 (기본값: 2)
+        
+    Returns:
+        bool: 최소 날짜 이후면 True, 이전이면 False
+    """
+    try:
+        # 네이버 카페 게시글 날짜 셀렉터들
+        date_selectors = [
+            "span.date",  # 일반적인 날짜 표시
+            "span.article_info span",  # 게시글 정보 내 날짜
+            "div.article_info span.date",
+            "span.WriterInfo__date--mYIJg",  # 새 UI
+            "div.ArticleWriterInfo span.date",
+            "span.se_publishDate",
+        ]
+        
+        date_text = None
+        for selector in date_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                for elem in elements:
+                    text = elem.text.strip()
+                    # 날짜 형식 확인 (YYYY.MM.DD 또는 YY.MM.DD 또는 MM.DD 등)
+                    if text and ('.' in text or '-' in text or '/' in text):
+                        date_text = text
+                        break
+                if date_text:
+                    break
+            except:
+                continue
+        
+        if not date_text:
+            # 날짜를 찾지 못하면 일단 처리 (안전하게)
+            print("  -> [날짜] 날짜 정보를 찾을 수 없음 (처리 진행)")
+            return True
+        
+        # 날짜 파싱
+        import re
+        
+        # "2026.02.08" 또는 "26.02.08" 또는 "2026-02-08" 형식
+        match = re.search(r'(\d{2,4})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_text)
+        if match:
+            year = int(match.group(1))
+            month = int(match.group(2))
+            
+            # 2자리 연도 처리
+            if year < 100:
+                year += 2000
+            
+            # 최소 날짜 이후인지 확인
+            if year > min_year:
+                return True
+            elif year == min_year and month >= min_month:
+                return True
+            else:
+                print(f"  -> [PASS] 오래된 글입니다. ({year}.{month:02d})")
+                return False
+        
+        # "2월 8일" 또는 "02.08" 형식 (올해로 가정)
+        match = re.search(r'(\d{1,2})[월.\-/]\s*(\d{1,2})', date_text)
+        if match:
+            month = int(match.group(1))
+            # 현재 연도로 가정
+            current_year = datetime.now().year
+            if current_year >= min_year and month >= min_month:
+                return True
+            elif current_year > min_year:
+                return True
+            else:
+                print(f"  -> [PASS] 오래된 글입니다. ({current_year}.{month:02d})")
+                return False
+        
+        # 파싱 실패시 일단 처리
+        print(f"  -> [날짜] 날짜 파싱 실패: {date_text} (처리 진행)")
+        return True
+        
+    except Exception as e:
+        # 에러 발생시 일단 처리
+        print(f"  -> [날짜] 날짜 확인 오류: {e} (처리 진행)")
+        return True
 
 
 def check_my_comment_exists(driver, my_nicknames=None):
@@ -1539,6 +1626,11 @@ def run_search_bot():
                                     print("  -> [PASS] 이미 내 댓글이 있는 글입니다.")
                                     driver.switch_to.default_content()
                                     continue
+                                
+                                # ⚠️ 날짜 체크: 2026년 2월 이후 글만 처리
+                                if not check_post_date(driver, min_year=2026, min_month=2):
+                                    driver.switch_to.default_content()
+                                    continue
 
                                 content = ""
                                 try: content = driver.find_element(By.CSS_SELECTOR, "div.se-main-container").text
@@ -1695,8 +1787,34 @@ def update_comment_status(comment_id, new_status, posted_at=None, is_duplicate=F
         print(f"[게시워커] 상태 업데이트 실패: {e}")
         return False
 
-def run_poster_bot():
-    """게시 워커: 승인된 댓글만 딜레이 적용하여 실제 게시"""
+def run_poster_bot_with_restart():
+    """게시 워커 자동 재시작 래퍼"""
+    max_restart_count = 0  # 무제한 재시작
+    restart_count = 0
+    
+    while True:
+        try:
+            print(f"\n[게시워커] 시작... (재시작 횟수: {restart_count})")
+            run_poster_bot_once()
+            print("[게시워커] 정상 종료")
+            break  # 정상 종료시 루프 탈출
+        except KeyboardInterrupt:
+            print("\n[게시워커] 사용자에 의해 중단됨")
+            break
+        except Exception as e:
+            restart_count += 1
+            print(f"\n[게시워커] 오류 발생: {e}")
+            print(f"[게시워커] 10초 후 자동 재시작... ({restart_count}번째)")
+            
+            if max_restart_count > 0 and restart_count >= max_restart_count:
+                print(f"[게시워커] 최대 재시작 횟수({max_restart_count})에 도달. 종료합니다.")
+                break
+            
+            time.sleep(10)  # 10초 대기 후 재시작
+            continue
+
+def run_poster_bot_once():
+    """게시 워커: 승인된 댓글만 딜레이 적용하여 실제 게시 (단일 실행)"""
     global poster_should_stop
     poster_should_stop = False
     
@@ -1875,6 +1993,32 @@ def run_poster_bot():
                     pass
         
         print("[게시워커] 종료 완료")
+
+def run_poster_bot():
+    """게시 워커 - 무한 루프로 계속 실행 (정상 종료 시에도 재시작)"""
+    restart_count = 0
+    
+    while True:
+        try:
+            print(f"\n{'='*60}")
+            print(f"[게시워커] 시작... (재시작 횟수: {restart_count})")
+            print(f"{'='*60}")
+            run_poster_bot_once()
+            # 정상 종료 시에도 재시작 (break 제거)
+            print("[게시워커] 사이클 완료, 10초 후 재시작...")
+            time.sleep(10)
+            restart_count += 1
+        except KeyboardInterrupt:
+            print("\n[게시워커] 사용자에 의해 중단됨")
+            break
+        except Exception as e:
+            restart_count += 1
+            print(f"\n{'='*60}")
+            print(f"[게시워커] 오류 발생: {type(e).__name__}: {str(e)[:200]}")
+            print(f"[게시워커] 10초 후 자동 재시작... ({restart_count}번째)")
+            print(f"{'='*60}")
+            time.sleep(10)
+            continue
 
 if __name__ == "__main__":
     # 봇 시작
